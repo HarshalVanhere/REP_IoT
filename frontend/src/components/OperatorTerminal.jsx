@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Play, Ban, AlertTriangle, Layers, Clock, ShieldAlert, KeyRound, LogOut, User } from 'lucide-react';
 import DowntimeReasonModal from './DowntimeReasonModal';
 
@@ -13,14 +13,33 @@ export default function OperatorTerminal({
   machines, 
   onStopMachine, 
   onResumeMachine, 
-  onTriggerPulse,
   sessionUser 
 }) {
-  const [selectedId, setSelectedId] = useState('1302');
+  const [selectedId, setSelectedId] = useState('1313');
   const [isReasonOpen, setIsReasonOpen] = useState(false);
   const [cycleTimer, setCycleTimer] = useState(0);
   const [operatorId, setOperatorId] = useState('');
   const [showManualLogin, setShowManualLogin] = useState(false);
+  
+  // Responsive scaling logic
+  const [scale, setScale] = useState(1);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (containerRef.current) {
+        const parentWidth = containerRef.current.parentElement.clientWidth;
+        if (parentWidth < 820) {
+          setScale(parentWidth / 820);
+        } else {
+          setScale(1);
+        }
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    handleResize();
+    return () => window.removeEventListener('resize', handleResize);
+  }, [machines]);
   const [loggedInOperator, setLoggedInOperator] = useState(() => {
     if (sessionUser?.role === 'Operator') {
       return sessionUser.displayName || sessionUser.operatorId || '';
@@ -112,7 +131,7 @@ export default function OperatorTerminal({
   const statusStyle = getStatusStyle();
 
   return (
-    <div className="flex flex-col items-center py-6 font-sans select-none w-full">
+    <div ref={containerRef} className="flex flex-col items-center py-6 font-sans select-none w-full overflow-hidden">
       
       {/* 1. Flex Wrap Machine Selector (Renders Full Names, Never Overlaps) */}
       {loggedInOperator && (
@@ -134,7 +153,14 @@ export default function OperatorTerminal({
       )}
 
       {/* 2. Touchscreen 5" Box Frame Wrapper (800x480) */}
-      <div className="relative border-[12px] border-slate-800 bg-slate-900 rounded-3xl shadow-2xl p-0.5 overflow-hidden w-[800px] h-[480px]">
+      <div 
+        style={{ 
+          transform: `scale(${scale})`, 
+          transformOrigin: 'top center',
+          marginBottom: `${(scale - 1) * 480}px` 
+        }}
+        className="relative border-[12px] border-slate-800 bg-slate-900 rounded-3xl shadow-2xl p-0.5 overflow-hidden w-[800px] h-[480px] transition-transform duration-200"
+      >
         <div className="absolute top-1 left-1/2 -translate-x-1/2 text-[7px] text-slate-500 font-extrabold tracking-widest uppercase">
           MES Touch Screen Terminal • 5.0 INCH
         </div>
@@ -328,11 +354,11 @@ export default function OperatorTerminal({
               </div>
 
               {/* Touch Control Buttons */}
-              <div className="flex gap-4 pt-1 pb-1">
+              <div className="flex gap-4 pt-1 pb-1 w-full">
                 {status === 'Running' ? (
                   <button
                     onClick={() => onStopMachine(selectedId)}
-                    className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs tracking-wider uppercase py-3.5 rounded-xl border border-rose-700 shadow-md flex items-center justify-center gap-2 transition-all active:scale-95"
+                    className="w-full bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs tracking-wider uppercase py-3.5 rounded-xl border border-rose-700 shadow-md flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
                   >
                     <ShieldAlert className="w-5 h-5" /> EMERGENCY STOP (HALT)
                   </button>
@@ -340,19 +366,11 @@ export default function OperatorTerminal({
                   <button
                     onClick={handleStartClick}
                     disabled={status === 'No Signal'}
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-extrabold text-xs tracking-wider uppercase py-3.5 rounded-xl border border-emerald-700 shadow-md flex items-center justify-center gap-2 transition-all active:scale-95"
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-extrabold text-xs tracking-wider uppercase py-3.5 rounded-xl border border-emerald-700 shadow-md flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
                   >
                     <Play className="w-5 h-5 fill-white" /> RESUME PRODUCTION
                   </button>
                 )}
-
-                <button
-                  onClick={() => onTriggerPulse(selectedId)}
-                  disabled={status !== 'Running'}
-                  className="flex-1 bg-sky-600 hover:bg-sky-750 disabled:opacity-40 disabled:bg-slate-300 disabled:border-slate-200 disabled:text-slate-400 text-white font-extrabold text-xs tracking-wider uppercase py-3.5 rounded-xl border border-sky-700 shadow-md flex items-center justify-center gap-2 transition-all active:scale-95"
-                >
-                  <Layers className="w-5 h-5" /> Cycle Complete Pulse
-                </button>
               </div>
             </>
           )}

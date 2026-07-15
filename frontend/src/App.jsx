@@ -69,6 +69,7 @@ function getShiftFromTimestamp(timestamp) {
 export default function App() {
   const [activeView, setActiveView] = useState('overview');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [filterModalOpen, setFilterModalOpen] = useState(false);
   
   // Tab metric state
@@ -304,17 +305,7 @@ export default function App() {
     };
   }, []);
 
-  const handleForcePulse = async (machineId) => {
-    try {
-      await fetch(`${BACKEND_URL}/api/simulator/force-pulse`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ machineId })
-      });
-    } catch (err) {
-      console.error('Failed to force pulse:', err.message);
-    }
-  };
+
 
   const handleStopMachine = async (machineId) => {
     try {
@@ -616,8 +607,16 @@ export default function App() {
   return (
     <div className="flex min-h-screen bg-[var(--bg-color-page)] font-sans transition-all duration-300">
       
-      {/* 1. LEFT SIDEBAR (Sticky Viewport Height) */}
-      <aside className={`bg-[var(--white-color)] border-r border-[var(--grey-200)] flex flex-col justify-between transition-all duration-300 ${sidebarCollapsed ? 'w-20' : 'w-72'} shrink-0 sticky top-0 h-screen select-none z-20`}>
+      {/* Mobile Sidebar Overlay Backdrop */}
+      {mobileSidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/40 backdrop-blur-xs z-35 lg:hidden transition-opacity duration-300"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+
+      {/* 1. LEFT SIDEBAR (Sticky on Desktop, Drawer on Mobile) */}
+      <aside className={`bg-[var(--white-color)] border-r border-[var(--grey-200)] flex flex-col justify-between transition-all duration-300 ${sidebarCollapsed ? 'w-20' : 'w-72'} shrink-0 h-screen select-none fixed lg:sticky top-0 left-0 z-40 lg:z-20 lg:translate-x-0 ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
         <div>
           {/* Logo Section */}
           <div className="p-5 border-b border-[var(--grey-200)] flex items-center justify-between">
@@ -638,7 +637,7 @@ export default function App() {
           <nav className="p-4 space-y-2.5 mt-6">
             {/* 1. Overview Dashboard */}
             <button
-              onClick={() => setActiveView('overview')}
+              onClick={() => { setActiveView('overview'); setMobileSidebarOpen(false); }}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                 activeView === 'overview'
                   ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
@@ -651,7 +650,7 @@ export default function App() {
 
             {/* 2. Machine Status Cards Grid */}
             <button
-              onClick={() => setActiveView('machines')}
+              onClick={() => { setActiveView('machines'); setMobileSidebarOpen(false); }}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                 activeView === 'machines'
                   ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
@@ -664,7 +663,7 @@ export default function App() {
 
             {/* 3. Recharts Analytics */}
             <button
-              onClick={() => setActiveView('analytics')}
+              onClick={() => { setActiveView('analytics'); setMobileSidebarOpen(false); }}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                 activeView === 'analytics'
                   ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
@@ -677,7 +676,7 @@ export default function App() {
 
             {/* 4. PPC Shift Planner Board */}
             <button
-              onClick={() => setActiveView('planning')}
+              onClick={() => { setActiveView('planning'); setMobileSidebarOpen(false); }}
               disabled={sessionUser.role !== 'PPC Engineer' && sessionUser.role !== 'Admin'}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                 sessionUser.role !== 'PPC Engineer' && sessionUser.role !== 'Admin'
@@ -693,7 +692,7 @@ export default function App() {
 
             {/* 5. Downtime and Logs */}
             <button
-              onClick={() => setActiveView('reports')}
+              onClick={() => { setActiveView('reports'); setMobileSidebarOpen(false); }}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                 activeView === 'reports'
                   ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
@@ -706,7 +705,7 @@ export default function App() {
 
             {/* 6. Operator Simulator Panel */}
             <button
-              onClick={() => setActiveView('operator')}
+              onClick={() => { setActiveView('operator'); setMobileSidebarOpen(false); }}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                 activeView === 'operator'
                   ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
@@ -720,7 +719,7 @@ export default function App() {
             {/* 7. User Profiles CRUD */}
             {sessionUser.role === 'Admin' && (
               <button
-                onClick={() => setActiveView('users')}
+                onClick={() => { setActiveView('users'); setMobileSidebarOpen(false); }}
                 className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
                   activeView === 'users'
                     ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
@@ -757,7 +756,7 @@ export default function App() {
           {/* Collapse toggle */}
           <button
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className="absolute top-1/2 right-[-14px] -translate-y-1/2 w-7 h-7 rounded-full bg-[var(--white-color)] border border-[var(--grey-200)] flex items-center justify-center text-slate-400 hover:text-[var(--primary)] hover:border-[var(--primary)] shadow-sm cursor-pointer z-10 transition-all duration-300"
+            className="absolute top-1/2 right-[-14px] -translate-y-1/2 w-7 h-7 rounded-full bg-[var(--white-color)] border border-[var(--grey-200)] flex items-center justify-center text-slate-400 hover:text-[var(--primary)] hover:border-[var(--primary)] shadow-sm cursor-pointer z-10 transition-all duration-300 hidden lg:flex"
           >
             {sidebarCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
           </button>
@@ -767,7 +766,11 @@ export default function App() {
       {/* 2. MAIN PANEL */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Header */}
-        <Header socketConnected={socketConnected} sessionUser={sessionUser} />
+        <Header 
+          socketConnected={socketConnected} 
+          sessionUser={sessionUser} 
+          onToggleMobileSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
+        />
 
         {/* Main Body with generous spacing */}
         <main className="flex-1 p-8 space-y-8 overflow-y-auto">
@@ -1419,7 +1422,6 @@ export default function App() {
                 machines={machines}
                 onStopMachine={handleStopMachine}
                 onResumeMachine={handleResumeMachine}
-                onTriggerPulse={handleForcePulse}
                 operatingMode={operatingMode}
                 sessionUser={sessionUser}
               />

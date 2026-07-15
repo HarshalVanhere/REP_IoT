@@ -9,18 +9,24 @@ const char* password = WIFI_PASSWORD;
 const char* mqtt_server = MQTT_SERVER;
 const int mqtt_port = MQTT_PORT;
 
-const char* machine_id = "1302"; // Machine ID matching database
-const char* topic_pulse = "cnc/1302/pulse";
-const char* topic_status = "cnc/1302/status";
+const char* machine_id = "1313"; // Machine ID matching database (1313 ACE CNC SUPER JOBBER)
+const char* topic_pulse = "cnc/1313/pulse";
+const char* topic_status = "cnc/1313/status";
 
 // --- Pin Definitions ---
-const int PIN_PULSE = 4;   // GPIO 4 - Cycle Finish Relay NO Contact
+const int PIN_PULSE = 4;   // GPIO 4 - Cycle Finish Relay NO Contact (Pulls to 3.3V when closed)
 const int PIN_STATUS = 5;  // GPIO 5 - Green Stack Light Relay NO Contact (HIGH = Running, LOW = Stopped)
 
 // --- Debounce & Timing Variables ---
 unsigned long lastPulseDebounce = 0;
-const unsigned long DEBOUNCE_DELAY = 1500; // 1.5 seconds minimum between finished parts
+const unsigned long PARTS_LOCKOUT_DELAY = 1500; // 1.5 seconds minimum between finished parts (lockout)
 unsigned long lastCycleStart = 0;
+
+// Debounce for mechanical relay noise on PIN_PULSE
+int lastPulsePinState = LOW;
+int stablePulseState = LOW;
+unsigned long lastPulsePinChange = 0;
+const unsigned long RELAY_DEBOUNCE_DELAY = 50; // 50ms contact debounce time
 
 int lastStatusState = -1; // -1 = uninitialized
 unsigned long lastStatusCheck = 0;
@@ -113,32 +119,51 @@ void loop() {
   }
   client.loop();
 
-  // --- 1. Read Cycle Complete Pulse (Active HIGH transition) ---
-  int pulseVal = digitalRead(PIN_PULSE);
-  if (pulseVal == HIGH && (millis() - lastPulseDebounce) > DEBOUNCE_DELAY) {
-    unsigned long now = millis();
-    float cycleTime = (now - lastCycleStart) / 1000.0;
-    
-    // Safety cap to avoid astronomical numbers if machine was off
-    if (cycleTime > 3600.0) {
-      cycleTime = 15.0; // Fallback to ideal if idle for > 1 hour
-    }
-    
-    // Prepare JSON payload
-    StaticJsonDocument<128> doc;
-    doc["cycleTime"] = cycleTime;
-    doc["isGood"] = true; // Default to true. Operator can log scraps in the UI if needed
-    
-    char buffer[128];
-    serializeJson(doc, buffer);
-    client.publish(topic_pulse, buffer);
-    
-    Serial.print("Part complete! Cycle Time: ");
-    Serial.print(cycleTime);
-    Serial.println("s");
+  // --- 1. Read Cycle Complete Pulse with debounce ---
+  int currentPulsePinVal = digitalRead(PIN_PULSE);
+  
+  // If the pin state changed (noise or transition)
+  if (currentPulsePinVal != lastPulsePinState) {
+    lastPulsePinChange = millis();
+    lastPulsePinState = currentPulsePinVal;
+  }
 
-    lastCycleStart = now;
-    lastPulseDebounce = now;
+  // If the state is stable for more than RELAY_DEBOUNCE_DELAY
+  if ((millis() - lastPulsePinChange) > RELAY_DEBOUNCE_DELAY) {
+    // If we transition to HIGH (active closure)
+    if (currentPulsePinVal == HIGH && stablePulseState == LOW) {
+      stablePulseState = HIGH;
+      
+      unsigned long now = millis();
+      // Check lockout delay to prevent double count from slow/multiple cycles
+      if ((now - lastPulseDebounce) > PARTS_LOCKOUT_DELAY) {
+        float cycleTime = (now - lastCycleStart) / 1000.0;
+        
+        // Safety cap to avoid astronomical numbers if machine was off
+        if (cycleTime > 3600.0) {
+          cycleTime = 15.0; // Fallback to ideal if idle for > 1 hour
+        }
+        
+        // Prepare JSON payload
+        StaticJsonDocument<128> doc;
+        doc["cycleTime"] = cycleTime;
+        doc["isGood"] = true; // Default to true. Operator can log scraps in the UI if needed
+        
+        char buffer[128];
+        serializeJson(doc, buffer);
+        client.publish(topic_pulse, buffer);
+        
+        Serial.print("Part complete (Machine 1313)! Cycle Time: ");
+        Serial.print(cycleTime);
+        Serial.println("s");
+
+        lastCycleStart = now;
+        lastPulseDebounce = now;
+      }
+    } else if (currentPulsePinVal == LOW && stablePulseState == HIGH) {
+      // Transition back to LOW
+      stablePulseState = LOW;
+    }
   }
 
   // --- 2. Read Running/Stopped Status changes ---

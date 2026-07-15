@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Wifi, WifiOff, Clock } from 'lucide-react';
+import { Wifi, WifiOff, Clock, Menu } from 'lucide-react';
 
-export default function Header({ socketConnected, sessionUser }) {
+export default function Header({ socketConnected, sessionUser, onToggleMobileSidebar }) {
   const [time, setTime] = useState(new Date());
 
   useEffect(() => {
@@ -48,9 +48,18 @@ export default function Header({ socketConnected, sessionUser }) {
     : 'DJ';
 
   return (
-    <div className="w-full flex lg:justify-between justify-end items-center py-2.5 px-6 bg-[var(--white-color)] border-b border-[var(--grey-200)] flex-wrap gap-3">
+    <div className="w-full flex justify-between items-center py-2.5 px-4 md:px-6 bg-[var(--white-color)] border-b border-[var(--grey-200)] flex-wrap gap-3">
       {/* Date & Time Widget (Left/Middle) */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
+        {/* Hamburger Menu Toggle for Mobile */}
+        <button
+          onClick={onToggleMobileSidebar}
+          className="lg:hidden p-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-500 transition active:scale-95 cursor-pointer shrink-0"
+          title="Toggle Navigation Menu"
+        >
+          <Menu className="w-5.5 h-5.5" />
+        </button>
+
         {/* Connection status badge */}
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black tracking-widest border border-slate-200 bg-[var(--bg-color-page)]">
           {socketConnected ? (

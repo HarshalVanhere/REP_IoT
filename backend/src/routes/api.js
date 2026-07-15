@@ -47,28 +47,7 @@ router.get('/machines/:id/history', async (req, res) => {
   }
 });
 
-/**
- * Simulated sensor cycle pulse (Operator Touchscreen demo simulator action)
- */
-router.post('/simulator/force-pulse', async (req, res) => {
-  const { machineId } = req.body;
-  if (!machineId) {
-    return res.status(400).json({ error: 'machineId is required' });
-  }
-  try {
-    const [machines] = await db.query('SELECT ideal_cycle_time FROM machines WHERE id = ?', [machineId]);
-    const ideal = machines.length > 0 ? machines[0].ideal_cycle_time : 15;
-    
-    const cycleTime = parseFloat((ideal + (Math.random() * 4 - 2)).toFixed(2));
-    const isGood = Math.random() > 0.02; // 98% quality rate
-    
-    publishMQTT(`cnc/${machineId}/pulse`, { cycleTime, isGood });
-    res.json({ success: true, message: `Pulse triggered for ${machineId}` });
-  } catch (err) {
-    console.error(`Pulse Simulation Error for ${machineId}:`, err.message);
-    res.status(500).json({ error: 'Failed to simulate machine pulse' });
-  }
-});
+
 
 /**
  * Stop machine (Operator touchscreen interface action)
