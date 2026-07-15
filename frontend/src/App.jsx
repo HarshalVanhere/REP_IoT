@@ -937,7 +937,7 @@ export default function App() {
                     <SlidersHorizontal className="w-4 h-4" /> Filters:
                   </span>
                   <span className="flex items-center bg-[var(--bg-color-page)] px-4 py-1.5 rounded-lg border border-[var(--grey-200)]">
-                    Plant: <strong className="text-[var(--grey-900)] ml-1">JBM Kanemitsu</strong>
+                    Plant: <strong className="text-[var(--grey-900)] ml-1">JBM REP</strong>
                   </span>
                   <span className="flex items-center bg-[var(--bg-color-page)] px-4 py-1.5 rounded-lg border border-[var(--grey-200)]">
                     Machine: <strong className="text-[var(--grey-900)] ml-1">{machineFilter.replace('All Machines', 'All')}</strong>
