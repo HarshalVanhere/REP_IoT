@@ -40,8 +40,11 @@ import AnalyticsCharts from './components/AnalyticsCharts';
 import OperatorTerminal from './components/OperatorTerminal';
 import ReportsLog from './components/ReportsLog';
 
-const BACKEND_URL = 'http://localhost:5001';
-const WS_URL = 'ws://localhost:5001';
+const DEFAULT_API_URL = import.meta.env.DEV
+  ? 'http://localhost:5001'
+  : 'https://repiot-production.up.railway.app';
+const BACKEND_URL = (import.meta.env.VITE_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
+const WS_URL = (import.meta.env.VITE_WS_URL || BACKEND_URL.replace(/^http/, 'ws')).replace(/\/$/, '');
 
 const SHIFT_OPTIONS = ['All Shifts', 'Shift A', 'Shift B', 'Shift C'];
 const STATUS_OPTIONS = ['All', 'Running', 'Stopped', 'No Signal'];
