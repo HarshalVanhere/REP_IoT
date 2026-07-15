@@ -61,9 +61,16 @@ async function setup() {
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         cycle_time DECIMAL(8,2) NOT NULL,
         is_good BOOLEAN NOT NULL DEFAULT TRUE,
+        synced BOOLEAN NOT NULL DEFAULT FALSE,
         FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
       )
     `);
+    try {
+      await connection.query('ALTER TABLE pulses ADD COLUMN synced BOOLEAN NOT NULL DEFAULT FALSE');
+      console.log('   + Added "synced" column to pulses table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
 
     // Create status_logs table
     console.log('🛠️  Creating "status_logs" table...');
@@ -77,9 +84,16 @@ async function setup() {
         downtime_reason VARCHAR(255) NULL,
         operator_id VARCHAR(50) NULL,
         part_name VARCHAR(100) NULL,
+        synced BOOLEAN NOT NULL DEFAULT FALSE,
         FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
       )
     `);
+    try {
+      await connection.query('ALTER TABLE status_logs ADD COLUMN synced BOOLEAN NOT NULL DEFAULT FALSE');
+      console.log('   + Added "synced" column to status_logs table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
 
     // Seed machines (8 CNC stations with planning profiles)
     console.log('🌱 Seeding initial 8 CNC machines data...');

@@ -212,4 +212,121 @@ router.delete('/users/:loginId', async (req, res) => {
   }
 });
 
+let wsBroadcastCallback = null;
+router.setBroadcastCallback = (cb) => {
+  wsBroadcastCallback = cb;
+};
+
+/**
+ * Receive batch synchronization data from Edge Gateways
+ */
+router.post('/sync/data', async (req, res) => {
+  const { pulses, statusLogs } = req.body;
+  
+  if (!pulses || !statusLogs) {
+    return res.status(400).json({ error: 'Invalid sync payload' });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 1. Process batch pulses
+    for (const pulse of pulses) {
+      // Check if pulse already exists in cloud DB to prevent duplication
+      const [existing] = await connection.query(
+        'SELECT id FROM pulses WHERE machine_id = ? AND timestamp = ? AND cycle_time = ?',
+        [pulse.machine_id, new Date(pulse.timestamp), pulse.cycle_time]
+      );
+
+      if (existing.length === 0) {
+        // Insert pulse
+        await connection.query(
+          'INSERT INTO pulses (machine_id, timestamp, cycle_time, is_good, synced) VALUES (?, ?, ?, ?, TRUE)',
+          [pulse.machine_id, new Date(pulse.timestamp), pulse.cycle_time, pulse.is_good]
+        );
+
+        // Update machine stats
+        const countField = pulse.is_good ? 'good_count' : 'scrap_count';
+        await connection.query(
+          `UPDATE machines SET 
+            production_count = production_count + 1, 
+            ${countField} = ${countField} + 1, 
+            last_pulse = ?,
+            status = 'Running'
+           WHERE id = ?`,
+          [new Date(pulse.timestamp), pulse.machine_id]
+        );
+      }
+    }
+
+    // 2. Process batch status logs
+    for (const log of statusLogs) {
+      // Check if log already exists in cloud DB
+      const [existing] = await connection.query(
+        'SELECT id FROM status_logs WHERE machine_id = ? AND status = ? AND start_time = ?',
+        [log.machine_id, log.status, new Date(log.start_time)]
+      );
+
+      if (existing.length === 0) {
+        await connection.query(
+          'INSERT INTO status_logs (machine_id, status, start_time, end_time, downtime_reason, operator_id, part_name, synced) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)',
+          [
+            log.machine_id, 
+            log.status, 
+            new Date(log.start_time), 
+            log.end_time ? new Date(log.end_time) : null, 
+            log.downtime_reason, 
+            log.operator_id, 
+            log.part_name
+          ]
+        );
+
+        // Update the machine's current status if this log is active (end_time is null) or newer
+        if (!log.end_time) {
+          await connection.query(
+            'UPDATE machines SET status = ? WHERE id = ?',
+            [log.status, log.machine_id]
+          );
+        }
+      } else {
+        // If it exists but end_time is now closed, update it
+        if (log.end_time) {
+          await connection.query(
+            'UPDATE status_logs SET end_time = ?, downtime_reason = ? WHERE id = ?',
+            [new Date(log.end_time), log.downtime_reason, existing[0].id]
+          );
+        }
+      }
+    }
+
+    await connection.commit();
+
+    // Trigger OEE recalculation & WebSocket broadcast for affected machines
+    const affectedMachineIds = new Set([
+      ...pulses.map(p => p.machine_id),
+      ...statusLogs.map(l => l.machine_id)
+    ]);
+
+    for (const machineId of affectedMachineIds) {
+      const oeeMetrics = await calculateOEE(machineId);
+      if (wsBroadcastCallback) {
+        wsBroadcastCallback({
+          type: 'SYNC_UPDATE',
+          machineId,
+          metrics: oeeMetrics
+        });
+      }
+    }
+
+    res.json({ success: true, message: `Successfully synced ${pulses.length} pulses and ${statusLogs.length} logs` });
+  } catch (err) {
+    await connection.rollback();
+    console.error('❌ Batch Sync Error:', err.message);
+    res.status(500).json({ error: 'Failed to synchronize batch payload' });
+  } finally {
+    connection.release();
+  }
+});
+
 export default router;

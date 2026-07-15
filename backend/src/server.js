@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 
 import apiRouter from './routes/api.js';
 import { startMQTTBroker } from './services/mqttService.js';
+import { startSyncService } from './services/syncService.js';
 
 dotenv.config();
 
@@ -65,6 +66,12 @@ function broadcast(data) {
 
 // Start MQTT broker and pass the WebSocket broadcast callback
 startMQTTBroker(broadcast);
+
+// Register WebSocket broadcast callback on the API router for synchronized updates
+apiRouter.setBroadcastCallback(broadcast);
+
+// Start the background sync client (if configured as Edge Gateway)
+startSyncService();
 
 // Start the HTTP server
 server.listen(PORT, async () => {

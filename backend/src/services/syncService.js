@@ -1,0 +1,143 @@
+import db from '../config/db.js';
+import http from 'http';
+import https from 'https';
+import { URL } from 'url';
+
+let syncIntervalId = null;
+let isSyncing = false; // Prevent overlapping runs
+
+/**
+ * Simple HTTP/HTTPS client helper for maximum compatibility across Node.js versions
+ */
+function request(urlStr, options, postData) {
+  return new Promise((resolve, reject) => {
+    try {
+      const url = new URL(urlStr);
+      const client = url.protocol === 'https:' ? https : http;
+      
+      const reqOptions = {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname + url.search,
+        method: options.method || 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {})
+        }
+      };
+
+      const req = client.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            text: () => Promise.resolve(data),
+            json: () => {
+              try {
+                return Promise.resolve(JSON.parse(data));
+              } catch (e) {
+                return Promise.reject(new Error(`Failed to parse JSON: ${data}`));
+              }
+            }
+          });
+        });
+      });
+
+      req.on('error', (err) => {
+        reject(err);
+      });
+
+      if (postData) {
+        req.write(typeof postData === 'string' ? postData : JSON.stringify(postData));
+      }
+      req.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+/**
+ * Starts the background sync service if configured as an Edge Gateway
+ */
+export function startSyncService() {
+  const isEdgeGateway = process.env.IS_EDGE_GATEWAY === 'true';
+  const cloudUrl = process.env.CLOUD_BACKEND_URL;
+
+  if (!isEdgeGateway) {
+    console.log('☁️  Running in Cloud Mode (Local Sync Client Disabled)');
+    return;
+  }
+
+  if (!cloudUrl) {
+    console.error('❌ Sync service error: CLOUD_BACKEND_URL is not set!');
+    return;
+  }
+
+  console.log(`📠 Running in Edge Gateway Mode. Syncing to: ${cloudUrl}`);
+
+  // Run synchronization check every 5 seconds
+  syncIntervalId = setInterval(async () => {
+    if (isSyncing) return;
+    isSyncing = true;
+
+    try {
+      await synchronizeData(cloudUrl);
+    } catch (err) {
+      // Log errors quietly to avoid bloating console in offline mode
+      console.warn(`🔄 Sync offline: Cloud unavailable (${err.message})`);
+    } finally {
+      isSyncing = false;
+    }
+  }, 5000);
+}
+
+/**
+ * Performs data synchronization
+ */
+async function synchronizeData(cloudUrl) {
+  // 1. Fetch unsynced pulses (batch of 50)
+  const [pulses] = await db.query(
+    'SELECT id, machine_id, timestamp, cycle_time, is_good FROM pulses WHERE synced = 0 ORDER BY id ASC LIMIT 50'
+  );
+
+  // 2. Fetch unsynced status logs (batch of 50)
+  const [statusLogs] = await db.query(
+    'SELECT id, machine_id, status, start_time, end_time, downtime_reason, operator_id, part_name FROM status_logs WHERE synced = 0 ORDER BY id ASC LIMIT 50'
+  );
+
+  if (pulses.length === 0 && statusLogs.length === 0) {
+    return; // Nothing to sync
+  }
+
+  console.log(`🔄 Sync: Found ${pulses.length} pulses and ${statusLogs.length} status logs to upload...`);
+
+  // 3. Post to the cloud backend sync endpoint
+  const syncEndpoint = `${cloudUrl.replace(/\/$/, '')}/api/sync/data`;
+  
+  const payload = { pulses, statusLogs };
+  const res = await request(syncEndpoint, { method: 'POST' }, payload);
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Cloud server returned ${res.status}: ${errorText}`);
+  }
+
+  const result = await res.json();
+  console.log(`✅ Sync: Uploaded batch. Cloud response:`, result);
+
+  // 4. Mark uploaded data as synced in local DB
+  if (pulses.length > 0) {
+    const pulseIds = pulses.map(p => p.id);
+    await db.query('UPDATE pulses SET synced = 1 WHERE id IN (?)', [pulseIds]);
+  }
+
+  if (statusLogs.length > 0) {
+    const logIds = statusLogs.map(l => l.id);
+    await db.query('UPDATE status_logs SET synced = 1 WHERE id IN (?)', [logIds]);
+  }
+}
