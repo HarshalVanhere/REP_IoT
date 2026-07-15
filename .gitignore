@@ -1,0 +1,23 @@
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+firmware/credentials.h
+
+# Dependencies and generated builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Imported design-reference material; the application source is in frontend/.
+target_site.html
+target_site_files/
+parsed_structure.txt

@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --primary: #0057ff;
+    --secondary: #ff2400;
+    --secondary1: #ff8350;
+    --secondary2: #0057ff;
+    --secondary2-trans-100: rgba(0, 87, 255, 0.051);
+    --secondary2-trans: rgba(0, 87, 255, 0.102);
+    --success: #057e39;
+    --success-100: #4ac0880d;
+    --success-200: #4ac08833;
+    --warning: #ff8350;
+    --warning-100: #ff83501a;
+    --warning-200: #ff835033;
+    --white-color: #ffffff;
+    --grey-200: #e2e8f0;
+    --grey-900: #0f172a;
+    --chart-blue: #0057ff;
+    --chart-orange: #ff8350;
+    --chart-green: #057e39;
+    
+    --bg-color-page: #f2f3f5;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    background-color: var(--bg-color-page);
+    color: var(--grey-900);
+    font-family: Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+
+  body {
+    background-image: none;
+    transition: background-color 200ms ease, color 200ms ease;
+  }
+
+  body[data-theme='dark'] {
+    --bg-color-page: #0f172a;
+    --white-color: #1e293b;
+    --grey-200: #334155;
+    --grey-900: #f8fafc;
+    --secondary2-trans-100: rgba(0, 87, 255, 0.15);
+    --secondary2-trans: rgba(0, 87, 255, 0.25);
+  }
+}
+
+@layer utilities {
+  /* Clean JBM Card Styles */
+  .jbm-card {
+    background-color: var(--white-color);
+    border: 1.5px solid var(--grey-200);
+    border-radius: 15px;
+  }
+
+  .jbm-card-hover {
+    transition: all 0.3s ease;
+  }
+
+  .jbm-card-hover:hover {
+    border-color: var(--primary);
+    box-shadow: 0 4px 12px rgba(0, 87, 255, 0.08);
+  }
+
+  /* Custom scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.3);
+    border-radius: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.5);
+  }
+}
+
+/* Pulsating animations for corporate status indicator */
+@keyframes status-pulse-green {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(5, 126, 57, 0.5);
+  }
+  70% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 6px rgba(5, 126, 57, 0);
+  }
+}
+
+.pulse-green {
+  animation: status-pulse-green 2s infinite;
+}
+
+@keyframes status-pulse-purple {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.5);
+  }
+  70% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 6px rgba(124, 58, 237, 0);
+  }
+}
+
+.pulse-purple {
+  animation: status-pulse-purple 2s infinite;
+}
+
+/* Scrollbar utility classes for lists */
+.scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+}
