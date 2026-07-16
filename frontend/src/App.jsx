@@ -41,8 +41,8 @@ import OperatorTerminal from './components/OperatorTerminal';
 import ReportsLog from './components/ReportsLog';
 
 const DEFAULT_API_URL = import.meta.env.DEV
-  ? 'http://localhost:5001'
-  : 'https://repiot-production.up.railway.app';
+  ? 'http://localhost:5000'
+  : (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5000');
 const BACKEND_URL = (import.meta.env.VITE_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
 const WS_URL = (import.meta.env.VITE_WS_URL || BACKEND_URL.replace(/^http/, 'ws')).replace(/\/$/, '');
 
