@@ -4,10 +4,16 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import dotenv from 'dotenv';
 
+import path from 'path';
+import { fileURLToPath } from 'url';
+
 import apiRouter from './routes/api.js';
 import { startMQTTBroker } from './services/mqttService.js';
 import { startSyncService } from './services/syncService.js';
 import { startSerialListener } from './services/serialService.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -21,9 +27,13 @@ app.use(express.json());
 // Routes
 app.use('/api', apiRouter);
 
-// Health Check
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date() });
+// Serve static frontend build files
+const frontendDistPath = path.join(__dirname, '../../frontend/dist');
+app.use(express.static(frontendDistPath));
+
+// Fallback to index.html for Single Page App routing (e.g. /operator)
+app.get('*', (req, res) => {
+  res.sendFile(path.join(frontendDistPath, 'index.html'));
 });
 
 // Create HTTP server
