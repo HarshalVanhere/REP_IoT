@@ -589,6 +589,23 @@ export default function App() {
     setFilterModalOpen(false);
   };
 
+  const isKioskMode = typeof window !== 'undefined' && 
+    (window.location.pathname.endsWith('/operator') || window.location.search.includes('view=operator'));
+
+  if (isKioskMode) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <OperatorTerminal
+          machines={machines}
+          onStopMachine={handleStopMachine}
+          onResumeMachine={handleResumeMachine}
+          operatingMode={operatingMode}
+          sessionUser={sessionUser || { loginId: 'KIOSK-1313', role: 'Operator', displayName: 'Station 1313 Operator', terminalId: '1313' }}
+        />
+      </div>
+    );
+  }
+
   if (!sessionUser) {
     return (
       <LoginScreen
