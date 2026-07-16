@@ -2,6 +2,7 @@ import express from 'express';
 import db from '../config/db.js';
 import { calculateOEE } from '../services/oeeCalculator.js';
 import { handleStatusMessage, handleResumeMessage, publishMQTT } from '../services/mqttService.js';
+import { sendSerialCommand } from '../services/serialService.js';
 
 const router = express.Router();
 
@@ -56,6 +57,10 @@ router.post('/machines/:id/stop', async (req, res) => {
   const machineId = req.params.id;
   try {
     await handleStatusMessage(machineId, 'Stopped');
+    
+    // Trigger physical machine lockout interlock relay
+    sendSerialCommand(machineId, 'stop');
+    
     res.json({ success: true, message: `CNC Machine ${machineId} status set to Stopped` });
   } catch (err) {
     console.error(`API Error: POST /machines/${machineId}/stop:`, err.message);
@@ -76,6 +81,10 @@ router.post('/machines/:id/resume', async (req, res) => {
 
   try {
     await handleResumeMessage(machineId, reason, operatorId);
+    
+    // Trigger physical machine run enablement interlock relay
+    sendSerialCommand(machineId, 'resume');
+    
     res.json({ success: true, message: `CNC Machine ${machineId} resumed in Running state` });
   } catch (err) {
     console.error(`API Error: POST /machines/${machineId}/resume:`, err.message);

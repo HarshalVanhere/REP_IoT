@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import apiRouter from './routes/api.js';
 import { startMQTTBroker } from './services/mqttService.js';
 import { startSyncService } from './services/syncService.js';
+import { startSerialListener } from './services/serialService.js';
 
 dotenv.config();
 
@@ -72,6 +73,9 @@ apiRouter.setBroadcastCallback(broadcast);
 
 // Start the background sync client (if configured as Edge Gateway)
 startSyncService();
+
+// Start the USB serial listener (if configured as Edge Gateway)
+startSerialListener();
 
 // Start the HTTP server
 server.listen(PORT, async () => {

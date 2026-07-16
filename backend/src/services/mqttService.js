@@ -80,7 +80,7 @@ export function publishMQTT(topic, payload) {
 /**
  * Handles pulse messages from machines
  */
-async function handlePulseMessage(machineId, payload) {
+export async function handlePulseMessage(machineId, payload) {
   const cycleTime = parseFloat(payload.cycleTime || 10);
   const isGood = payload.isGood !== undefined ? payload.isGood : true;
   const timestamp = new Date();

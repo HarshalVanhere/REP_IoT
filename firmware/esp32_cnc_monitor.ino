@@ -1,21 +1,10 @@
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include <ArduinoJson.h> // Ensure you install "ArduinoJson" by Benoit Blanchon in Library Manager
-#include "credentials.h"
-
 // --- Configuration ---
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
-const char* mqtt_server = MQTT_SERVER;
-const int mqtt_port = MQTT_PORT;
-
 const char* machine_id = "1313"; // Machine ID matching database (1313 ACE CNC SUPER JOBBER)
-const char* topic_pulse = "cnc/1313/pulse";
-const char* topic_status = "cnc/1313/status";
 
 // --- Pin Definitions ---
 const int PIN_PULSE = 4;   // GPIO 4 - Cycle Finish Relay NO Contact (Pulls to 3.3V when closed)
 const int PIN_STATUS = 5;  // GPIO 5 - Green Stack Light Relay NO Contact (HIGH = Running, LOW = Stopped)
+const int PIN_RUN_ENABLE = 12; // GPIO 12 - Output to CNC Interlock Relay Coil (HIGH = Enabled, LOW = Safe Cut)
 
 // --- Debounce & Timing Variables ---
 unsigned long lastPulseDebounce = 0;
@@ -32,92 +21,80 @@ int lastStatusState = -1; // -1 = uninitialized
 unsigned long lastStatusCheck = 0;
 const unsigned long STATUS_CHECK_INTERVAL = 500; // Poll status state every 500ms
 
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-void setupWiFi() {
-  delay(10);
-  Serial.println();
-  Serial.print("Connecting to Wi-Fi: ");
-  Serial.println(ssid);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("Wi-Fi connected.");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-void reconnectMQTT() {
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a unique client ID based on ESP32 MAC address
-    String clientId = "ESP32Client-" + String(WiFi.macAddress());
-    
-    // Connect to Broker. We configure a "Last Will and Testament" (LWT) so that
-    // if the ESP32 loses power or Wi-Fi, the broker automatically marks the machine "No Signal"
-    StaticJsonDocument<64> lwtPayload;
-    lwtPayload["status"] = "No Signal";
-    String lwtString;
-    serializeJson(lwtPayload, lwtString);
-
-    if (client.connect(clientId.c_str(), topic_status, 0, true, lwtString.c_str())) {
-      Serial.println("connected!");
-      // Send initial status after connection
-      sendCurrentStatus();
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
-  }
-}
+// Character buffer for incoming serial command lines
+char rxBuffer[128];
+size_t rxIndex = 0;
 
 void sendCurrentStatus() {
   int rawVal = digitalRead(PIN_STATUS);
   // Relay energized pulls pin HIGH -> Machine is Running
-  String statusStr = (rawVal == HIGH) ? "Running" : "Stopped";
+  const char* statusStr = (rawVal == HIGH) ? "Running" : "Stopped";
   
-  StaticJsonDocument<64> doc;
-  doc["status"] = statusStr;
-  
-  char buffer[128];
-  serializeJson(doc, buffer);
-  client.publish(topic_status, buffer, true); // Retained message
-  Serial.print("Published status: ");
-  Serial.println(statusStr);
+  // Output JSON formatted telemetry over Serial
+  Serial.print("{\"type\":\"status\",\"status\":\"");
+  Serial.print(statusStr);
+  Serial.println("\"}");
+}
+
+/**
+ * Parses received C-string commands using safe static comparisons
+ */
+void parseCommand(const char* line) {
+  if (strstr(line, "\"command\":\"resume\"") != NULL) {
+    digitalWrite(PIN_RUN_ENABLE, HIGH);
+    Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay energized (Run Enabled)\"}");
+  } else if (strstr(line, "\"command\":\"stop\"") != NULL) {
+    digitalWrite(PIN_RUN_ENABLE, LOW);
+    Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay de-energized (Run Locked)\"}");
+  }
+}
+
+/**
+ * Reads bytes from Serial asynchronously to avoid blocking the main execution loop
+ */
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    
+    if (c == '\n' || c == '\r') {
+      if (rxIndex > 0) {
+        rxBuffer[rxIndex] = '\0'; // Null terminate
+        parseCommand(rxBuffer);
+        rxIndex = 0; // Reset
+      }
+    } else {
+      if (rxIndex < sizeof(rxBuffer) - 1) {
+        rxBuffer[rxIndex++] = c;
+      } else {
+        // Buffer overflow protection: reset index to discard corrupted input
+        rxIndex = 0;
+      }
+    }
+  }
 }
 
 void setup() {
+  // Initialize Serial port for USB communication at 115200 baud
   Serial.begin(115200);
   
   // Configure input pins with internal pull-down to prevent floating signals
   pinMode(PIN_PULSE, INPUT_PULLDOWN);
   pinMode(PIN_STATUS, INPUT_PULLDOWN);
-
-  setupWiFi();
-  client.setServer(mqtt_server, mqtt_port);
+  
+  // Configure run-enable output pin, starting in LOW (disabled) state for safety
+  pinMode(PIN_RUN_ENABLE, OUTPUT);
+  digitalWrite(PIN_RUN_ENABLE, LOW);
   
   lastCycleStart = millis();
+  
+  // Wait a moment for Serial to initialize and send initial status
+  delay(500);
+  sendCurrentStatus();
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    setupWiFi();
-  }
-  
-  if (!client.connected()) {
-    reconnectMQTT();
-  }
-  client.loop();
+  // Listen for control commands from the Edge Gateway backend
+  readSerialCommands();
 
   // --- 1. Read Cycle Complete Pulse with debounce ---
   int currentPulsePinVal = digitalRead(PIN_PULSE);
@@ -144,18 +121,10 @@ void loop() {
           cycleTime = 15.0; // Fallback to ideal if idle for > 1 hour
         }
         
-        // Prepare JSON payload
-        StaticJsonDocument<128> doc;
-        doc["cycleTime"] = cycleTime;
-        doc["isGood"] = true; // Default to true. Operator can log scraps in the UI if needed
-        
-        char buffer[128];
-        serializeJson(doc, buffer);
-        client.publish(topic_pulse, buffer);
-        
-        Serial.print("Part complete (Machine 1313)! Cycle Time: ");
-        Serial.print(cycleTime);
-        Serial.println("s");
+        // Output JSON formatted telemetry over Serial
+        Serial.print("{\"type\":\"pulse\",\"cycleTime\":");
+        Serial.print(cycleTime, 2);
+        Serial.println("}");
 
         lastCycleStart = now;
         lastPulseDebounce = now;
