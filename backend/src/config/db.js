@@ -473,6 +473,18 @@ const db = {
     }
     return pool.execute(sql, params);
   },
+  getConnection: async () => {
+    if (isMock) {
+      return {
+        beginTransaction: async () => {},
+        commit: async () => {},
+        rollback: async () => {},
+        query: async (sql, params) => mockQuery(sql, params),
+        release: () => {}
+      };
+    }
+    return pool.getConnection();
+  },
   getPool: () => pool
 };
 
