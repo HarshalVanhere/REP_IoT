@@ -594,7 +594,7 @@ export default function App() {
 
   if (isKioskMode) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+      <div className="min-h-screen w-screen bg-slate-950 overflow-hidden m-0 p-0">
         <OperatorTerminal
           machines={machines}
           onStopMachine={handleStopMachine}
