@@ -4,7 +4,7 @@ const char* machine_id = "1313"; // Machine ID matching database (1313 ACE CNC S
 // --- Pin Definitions ---
 const int PIN_PULSE = 4;   // GPIO 4 - Cycle Finish Relay NO Contact (Pulls to 3.3V when closed)
 const int PIN_STATUS = 5;  // GPIO 5 - Green Stack Light Relay NO Contact (HIGH = Running, LOW = Stopped)
-const int PIN_RUN_ENABLE = 12; // GPIO 12 - Output to CNC Interlock Relay Coil (HIGH = Enabled, LOW = Safe Cut)
+const int PIN_RUN_ENABLE = 27; // GPIO 27 - Output to CNC Interlock Relay Coil (Safer than GPIO 12 bootstrapping pin)
 
 // --- Debounce & Timing Variables ---
 unsigned long lastPulseDebounce = 0;
@@ -27,8 +27,9 @@ size_t rxIndex = 0;
 
 void sendCurrentStatus() {
   int rawVal = digitalRead(PIN_STATUS);
-  // Relay energized pulls pin HIGH -> Machine is Running
-  const char* statusStr = (rawVal == HIGH) ? "Running" : "Stopped";
+  int runEnableVal = digitalRead(PIN_RUN_ENABLE);
+  // Relay energized pulls pin HIGH -> Machine is Running, BUT only if interlock is also enabled!
+  const char* statusStr = (runEnableVal == HIGH && rawVal == HIGH) ? "Running" : "Stopped";
   
   // Output JSON formatted telemetry over Serial
   Serial.print("{\"type\":\"status\",\"status\":\"");
@@ -43,9 +44,24 @@ void parseCommand(const char* line) {
   if (strstr(line, "\"command\":\"resume\"") != NULL) {
     digitalWrite(PIN_RUN_ENABLE, HIGH);
     Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay energized (Run Enabled)\"}");
+    
+    // Reset cycle start timer on resume so that the next pulse calculates cycle duration correctly
+    lastCycleStart = millis();
+    
+    // Emit command acknowledgement
+    Serial.println("{\"type\":\"ack\",\"command\":\"resume\",\"status\":\"success\"}");
+    
+    // Force immediate status update
+    sendCurrentStatus();
   } else if (strstr(line, "\"command\":\"stop\"") != NULL) {
     digitalWrite(PIN_RUN_ENABLE, LOW);
     Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay de-energized (Run Locked)\"}");
+    
+    // Emit command acknowledgement
+    Serial.println("{\"type\":\"ack\",\"command\":\"stop\",\"status\":\"success\"}");
+    
+    // Force immediate status update
+    sendCurrentStatus();
   }
 }
 
@@ -139,6 +155,10 @@ void loop() {
   if (millis() - lastStatusCheck > STATUS_CHECK_INTERVAL) {
     int currentVal = digitalRead(PIN_STATUS);
     if (currentVal != lastStatusState) {
+      // If machine transitioned from Stopped to Running, reset the cycle start timer
+      if (currentVal == HIGH && lastStatusState == LOW) {
+        lastCycleStart = millis();
+      }
       lastStatusState = currentVal;
       sendCurrentStatus();
     }

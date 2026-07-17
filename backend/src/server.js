@@ -11,6 +11,7 @@ import apiRouter from './routes/api.js';
 import { startMQTTBroker } from './services/mqttService.js';
 import { startSyncService } from './services/syncService.js';
 import { startSerialListener } from './services/serialService.js';
+import { startWatchdogService } from './services/watchdogService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,6 +87,9 @@ startSyncService();
 
 // Start the USB serial listener (if configured as Edge Gateway)
 startSerialListener();
+
+// Start the stale-pulse watchdog service
+startWatchdogService();
 
 // Start the HTTP server
 server.listen(PORT, async () => {

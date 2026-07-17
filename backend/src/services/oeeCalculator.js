@@ -171,37 +171,64 @@ export async function calculateOEE(machineId) {
       [machineId, midnight]
     );
 
-    // 3. Fetch pulses since midnight
-    const [pulses] = await db.query(
-      'SELECT timestamp, cycle_time, is_good FROM pulses WHERE machine_id = ? AND timestamp >= ?',
-      [machineId, midnight]
-    );
-
-    // 4. Calculate last cycle time
+    // 3. Fetch pulses / shift-wise counts (optimized using DB-level aggregates)
     let lastCycleTime = 0;
-    if (pulses.length > 0) {
-      lastCycleTime = parseFloat(pulses[pulses.length - 1].cycle_time || 0);
-    }
-
-    // 5. Shift-wise production count (A, B, C)
     let shiftA = 0;
     let shiftB = 0;
     let shiftC = 0;
 
-    pulses.forEach(pulse => {
-      const pulseTime = new Date(pulse.timestamp);
-      const hour = pulseTime.getHours();
-      const minute = pulseTime.getMinutes();
-      const minutesSinceMidnight = hour * 60 + minute;
-      
-      if (minutesSinceMidnight >= 7 * 60 && minutesSinceMidnight < 15.5 * 60) {
-        shiftA++;
-      } else if (minutesSinceMidnight >= 15.5 * 60 && minutesSinceMidnight < 24 * 60) {
-        shiftB++;
-      } else {
-        shiftC++;
+    if (db.isMock) {
+      const [pulses] = await db.query(
+        'SELECT timestamp, cycle_time, is_good FROM pulses WHERE machine_id = ? AND timestamp >= ?',
+        [machineId, midnight]
+      );
+
+      // Calculate last cycle time
+      if (pulses.length > 0) {
+        lastCycleTime = parseFloat(pulses[pulses.length - 1].cycle_time || 0);
       }
-    });
+
+      // Shift-wise production count (A, B, C)
+      pulses.forEach(pulse => {
+        const pulseTime = new Date(pulse.timestamp);
+        const hour = pulseTime.getHours();
+        const minute = pulseTime.getMinutes();
+        const minutesSinceMidnight = hour * 60 + minute;
+        
+        if (minutesSinceMidnight >= 7 * 60 && minutesSinceMidnight < 15.5 * 60) {
+          shiftA++;
+        } else if (minutesSinceMidnight >= 15.5 * 60 && minutesSinceMidnight < 24 * 60) {
+          shiftB++;
+        } else {
+          shiftC++;
+        }
+      });
+    } else {
+      // 1. Fetch last cycle time (limit 1)
+      const [lastPulseRows] = await db.query(
+        'SELECT cycle_time FROM pulses WHERE machine_id = ? ORDER BY timestamp DESC LIMIT 1',
+        [machineId]
+      );
+      if (lastPulseRows.length > 0) {
+        lastCycleTime = parseFloat(lastPulseRows[0].cycle_time || 0);
+      }
+
+      // 2. Perform DB aggregation for shift counts
+      const [shiftRows] = await db.query(
+        `SELECT 
+          COALESCE(SUM(CASE WHEN HOUR(timestamp)*60 + MINUTE(timestamp) >= 420 AND HOUR(timestamp)*60 + MINUTE(timestamp) < 930 THEN 1 ELSE 0 END), 0) as shiftA,
+          COALESCE(SUM(CASE WHEN HOUR(timestamp)*60 + MINUTE(timestamp) >= 930 AND HOUR(timestamp)*60 + MINUTE(timestamp) < 1440 THEN 1 ELSE 0 END), 0) as shiftB,
+          COALESCE(SUM(CASE WHEN HOUR(timestamp)*60 + MINUTE(timestamp) < 420 THEN 1 ELSE 0 END), 0) as shiftC
+         FROM pulses 
+         WHERE machine_id = ? AND timestamp >= ?`,
+        [machineId, midnight]
+      );
+      if (shiftRows.length > 0) {
+        shiftA = parseInt(shiftRows[0].shiftA || 0);
+        shiftB = parseInt(shiftRows[0].shiftB || 0);
+        shiftC = parseInt(shiftRows[0].shiftC || 0);
+      }
+    }
 
     // 6. Calculate durations for utilization (Running, Stopped, No Signal)
     let runningSeconds = 0;

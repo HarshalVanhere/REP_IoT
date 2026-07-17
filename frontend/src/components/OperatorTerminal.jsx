@@ -30,7 +30,7 @@ export default function OperatorTerminal({
   
   // Find active selected machine
   const machine = machines.find(m => m.id === selectedId) || {};
-  const { name = '1313 ACE CNC SUPER JOBBER', status = 'No Signal', target = 500, production_count = 0, last_pulse, ideal_cycle_time = 12, metrics } = machine;
+  const { name = '1313 ACE CNC SUPER JOBBER', status = 'No Signal', target = 500, production_count = 0, last_pulse, ideal_cycle_time = 12, metrics, assigned_operator, active_part_name } = machine;
   const { lastCycleTime = 0, currentShift = 'Shift A' } = metrics || {};
   const achievementRate = target > 0 ? (production_count / target) * 100 : 0;
 

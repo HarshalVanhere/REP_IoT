@@ -5,6 +5,7 @@ import { handlePulseMessage, handleStatusMessage } from './mqttService.js';
 
 let portInstance = null;
 let reconnectTimer = null;
+const pendingAcks = new Map(); // command -> { resolve, reject, timeout }
 
 /**
  * Starts the Serial port listener on the Edge Gateway
@@ -81,6 +82,19 @@ function connectSerial(portPath, baudRate) {
         return;
       }
 
+      // If it is an acknowledgement
+      if (payload.type === 'ack') {
+        const command = payload.command;
+        const pending = pendingAcks.get(command);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          pendingAcks.delete(command);
+          console.log(`✅ Serial: Command "${command}" acknowledged by ESP32.`);
+          pending.resolve(payload);
+        }
+        return;
+      }
+
       console.log(`🔌 Serial: Received telemetry ->`, payload);
 
       if (payload.type === 'pulse') {
@@ -111,22 +125,50 @@ function connectSerial(portPath, baudRate) {
 
 /**
  * Sends a command to the ESP32 over serial (e.g. "resume" or "stop")
+ * Returns a Promise that resolves when the ESP32 acknowledges the command.
  */
 export function sendSerialCommand(machineId, command) {
-  if (machineId !== '1313') return;
-
-  if (!portInstance || !portInstance.isOpen) {
-    console.warn(`⚠️  Serial: Cannot send command "${command}". Port is not open.`);
-    return;
+  const isEdgeGateway = process.env.IS_EDGE_GATEWAY === 'true';
+  if (!isEdgeGateway) {
+    console.log(`☁️ Cloud Mode: Simulating serial command "${command}" for machine ${machineId}`);
+    return Promise.resolve({ type: 'ack', command, status: 'success' });
   }
 
-  const payload = JSON.stringify({ command });
-  portInstance.write(payload + '\n', (err) => {
-    if (err) {
-      console.error(`❌ Serial: Error sending command "${command}":`, err.message);
-    } else {
-      console.log(`🔌 Serial: Sent control command ->`, payload);
+  if (machineId !== '1313') {
+    return Promise.reject(new Error('Invalid machine ID for serial interlock'));
+  }
+
+  if (!portInstance || !portInstance.isOpen) {
+    return Promise.reject(new Error('Serial port is not open'));
+  }
+
+  return new Promise((resolve, reject) => {
+    // If there is already a pending command of this type, reject it first
+    const existing = pendingAcks.get(command);
+    if (existing) {
+      clearTimeout(existing.timeout);
+      existing.reject(new Error(`Superceded by new "${command}" command`));
+      pendingAcks.delete(command);
     }
+
+    const payload = JSON.stringify({ command });
+    
+    const timeout = setTimeout(() => {
+      pendingAcks.delete(command);
+      reject(new Error(`Timeout waiting for ESP32 acknowledgement for command: ${command}`));
+    }, 2000);
+
+    pendingAcks.set(command, { resolve, reject, timeout });
+
+    portInstance.write(payload + '\n', (err) => {
+      if (err) {
+        clearTimeout(timeout);
+        pendingAcks.delete(command);
+        reject(new Error(`Failed to write to serial port: ${err.message}`));
+      } else {
+        console.log(`🔌 Serial: Sent control command ->`, payload);
+      }
+    });
   });
 }
 

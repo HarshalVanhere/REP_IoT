@@ -280,6 +280,40 @@ export default function App() {
 
             fetchReports();
           }
+
+          if (data.type === 'SYNC_UPDATE') {
+            const { machineId, production_count, good_count, scrap_count, last_pulse, status, metrics } = data;
+
+            setMachines((prev) => prev.map((machine) => {
+              if (machine.id !== machineId) return machine;
+
+              return {
+                ...machine,
+                production_count: production_count !== undefined ? production_count : machine.production_count,
+                good_count: good_count !== undefined ? good_count : machine.good_count,
+                scrap_count: scrap_count !== undefined ? scrap_count : machine.scrap_count,
+                last_pulse: last_pulse !== undefined ? last_pulse : machine.last_pulse,
+                status: status !== undefined ? status : machine.status,
+                metrics: metrics !== undefined ? metrics : machine.metrics
+              };
+            }));
+
+            // Refresh logs and history as sync data has arrived
+            const fetchUpdatedHistory = async () => {
+              try {
+                const histRes = await fetch(`${BACKEND_URL}/api/machines/${machineId}/history`);
+                const historyList = await histRes.json();
+                setHistories((prev) => ({
+                  ...prev,
+                  [machineId]: historyList
+                }));
+              } catch (err) {
+                console.error(`Failed to refresh history for machine ${machineId}:`, err.message);
+              }
+            };
+            fetchUpdatedHistory();
+            fetchReports();
+          }
         } catch (err) {
           console.error('Error parsing WebSocket message:', err.message);
         }

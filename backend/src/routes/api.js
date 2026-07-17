@@ -56,15 +56,16 @@ router.get('/machines/:id/history', async (req, res) => {
 router.post('/machines/:id/stop', async (req, res) => {
   const machineId = req.params.id;
   try {
+    // 1. Trigger physical machine lockout and wait for ESP32 confirmation
+    await sendSerialCommand(machineId, 'stop');
+    
+    // 2. Only transition database/status after serial confirmation
     await handleStatusMessage(machineId, 'Stopped');
     
-    // Trigger physical machine lockout interlock relay
-    sendSerialCommand(machineId, 'stop');
-    
-    res.json({ success: true, message: `CNC Machine ${machineId} status set to Stopped` });
+    res.json({ success: true, message: `CNC Machine ${machineId} status set to Stopped (Confirmed by hardware)` });
   } catch (err) {
     console.error(`API Error: POST /machines/${machineId}/stop:`, err.message);
-    res.status(500).json({ error: 'Failed to stop CNC machine' });
+    res.status(500).json({ error: `Failed to stop CNC machine: ${err.message}` });
   }
 });
 
@@ -80,15 +81,16 @@ router.post('/machines/:id/resume', async (req, res) => {
   }
 
   try {
+    // 1. Trigger physical machine run enablement and wait for ESP32 confirmation
+    await sendSerialCommand(machineId, 'resume');
+    
+    // 2. Only transition database/status after serial confirmation
     await handleResumeMessage(machineId, reason, operatorId);
     
-    // Trigger physical machine run enablement interlock relay
-    sendSerialCommand(machineId, 'resume');
-    
-    res.json({ success: true, message: `CNC Machine ${machineId} resumed in Running state` });
+    res.json({ success: true, message: `CNC Machine ${machineId} resumed in Running state (Confirmed by hardware)` });
   } catch (err) {
     console.error(`API Error: POST /machines/${machineId}/resume:`, err.message);
-    res.status(500).json({ error: 'Failed to resume CNC machine' });
+    res.status(500).json({ error: `Failed to resume CNC machine: ${err.message}` });
   }
 });
 
@@ -319,10 +321,21 @@ router.post('/sync/data', async (req, res) => {
 
     for (const machineId of affectedMachineIds) {
       const oeeMetrics = await calculateOEE(machineId);
+      const [machines] = await connection.query(
+        'SELECT production_count, good_count, scrap_count, last_pulse, status FROM machines WHERE id = ?',
+        [machineId]
+      );
+      const machineData = machines[0] || {};
+
       if (wsBroadcastCallback) {
         wsBroadcastCallback({
           type: 'SYNC_UPDATE',
           machineId,
+          production_count: machineData.production_count,
+          good_count: machineData.good_count,
+          scrap_count: machineData.scrap_count,
+          last_pulse: machineData.last_pulse,
+          status: machineData.status,
           metrics: oeeMetrics
         });
       }

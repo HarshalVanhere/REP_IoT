@@ -164,7 +164,12 @@ try {
     queueLimit: 0
   };
 
+  const isProduction = process.env.NODE_ENV === 'production';
+
   if (process.env.DB_PASSWORD === 'your_mysql_password' || !process.env.DB_PASSWORD) {
+    if (isProduction) {
+      throw new Error('Database password is unset or placeholder. Database connection is required in production mode.');
+    }
     console.warn('⚠️  Database password is unset or placeholder. Falling back to IN-MEMORY MOCK database mode.');
     isMock = true;
     seedMockData();
@@ -196,6 +201,10 @@ try {
     }
   }
 } catch (error) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('❌ Production Error: Failed to connect to MySQL database:', error.message);
+    process.exit(1);
+  }
   console.warn('⚠️  Could not connect to MySQL database. Details:', error.message);
   isMock = true;
   pool = null;
