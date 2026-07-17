@@ -1,5 +1,6 @@
 import db from '../config/db.js';
 import { handleStatusMessage } from './mqttService.js';
+import { sendSerialCommand } from './serialService.js';
 
 let watchdogInterval = null;
 
@@ -28,6 +29,13 @@ export function startWatchdogService() {
 
         if (secondsSinceLastPulse > threshold) {
           console.log(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Stopped.`);
+          
+          // Trigger physical machine lockout interlock relay
+          try {
+            await sendSerialCommand(machine.id, 'stop');
+          } catch (serialErr) {
+            console.warn(`⏰ Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
+          }
           
           // Force-transition status to Stopped (closes running log and creates stopped log)
           await handleStatusMessage(machine.id, 'Stopped');
