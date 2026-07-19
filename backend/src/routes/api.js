@@ -311,17 +311,20 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
 
     // 1. Process batch pulses
     for (const pulse of pulses) {
+      const pulseTime = new Date(pulse.timestamp);
+      pulseTime.setMilliseconds(0);
+
       // Check if pulse already exists in cloud DB to prevent duplication
       const [existing] = await connection.query(
         'SELECT id FROM pulses WHERE machine_id = ? AND timestamp = ? AND cycle_time = ?',
-        [pulse.machine_id, new Date(pulse.timestamp), pulse.cycle_time]
+        [pulse.machine_id, pulseTime, pulse.cycle_time]
       );
 
       if (existing.length === 0) {
         // Insert pulse
         await connection.query(
           'INSERT INTO pulses (machine_id, timestamp, cycle_time, is_good, synced) VALUES (?, ?, ?, ?, TRUE)',
-          [pulse.machine_id, new Date(pulse.timestamp), pulse.cycle_time, pulse.is_good]
+          [pulse.machine_id, pulseTime, pulse.cycle_time, pulse.is_good]
         );
 
         // Update machine stats. Deliberately does NOT force status='Running' - these can be
@@ -335,17 +338,22 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
             ${countField} = ${countField} + 1,
             last_pulse = ?
            WHERE id = ?`,
-          [new Date(pulse.timestamp), pulse.machine_id]
+          [pulseTime, pulse.machine_id]
         );
       }
     }
 
     // 2. Process batch status logs
     for (const log of statusLogs) {
+      const startTime = new Date(log.start_time);
+      startTime.setMilliseconds(0);
+      const endTime = log.end_time ? new Date(log.end_time) : null;
+      if (endTime) endTime.setMilliseconds(0);
+
       // Check if log already exists in cloud DB
       const [existing] = await connection.query(
         'SELECT id FROM status_logs WHERE machine_id = ? AND status = ? AND start_time = ?',
-        [log.machine_id, log.status, new Date(log.start_time)]
+        [log.machine_id, log.status, startTime]
       );
 
       if (existing.length === 0) {
@@ -354,8 +362,8 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
           [
             log.machine_id,
             log.status,
-            new Date(log.start_time),
-            log.end_time ? new Date(log.end_time) : null,
+            startTime,
+            endTime,
             log.downtime_reason,
             log.operator_id,
             log.part_name
@@ -363,7 +371,7 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
         );
 
         // Update the machine's current status if this log is active (end_time is null) or newer
-        if (!log.end_time) {
+        if (!endTime) {
           await connection.query(
             'UPDATE machines SET status = ? WHERE id = ?',
             [log.status, log.machine_id]
@@ -371,10 +379,10 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
         }
       } else {
         // If it exists but end_time is now closed, update it
-        if (log.end_time) {
+        if (endTime) {
           await connection.query(
             'UPDATE status_logs SET end_time = ?, downtime_reason = ? WHERE id = ?',
-            [new Date(log.end_time), log.downtime_reason, existing[0].id]
+            [endTime, log.downtime_reason, existing[0].id]
           );
         }
       }

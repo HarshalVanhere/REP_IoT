@@ -103,6 +103,7 @@ export async function handlePulseMessage(machineId, payload) {
   const cycleTime = parseFloat(payload.cycleTime || 10);
   const isGood = payload.isGood !== undefined ? payload.isGood : true;
   const timestamp = new Date();
+  timestamp.setMilliseconds(0);
 
   // 1. Double check if machine exists, if not create/verify it
   const [machines] = await db.query('SELECT * FROM machines WHERE id = ?', [machineId]);
@@ -176,6 +177,7 @@ export async function handleStatusMessage(machineId, status) {
   }
 
   const timestamp = new Date();
+  timestamp.setMilliseconds(0);
 
   // 1. Fetch current status of machine to check for transition
   const [machines] = await db.query('SELECT status FROM machines WHERE id = ?', [machineId]);
@@ -210,6 +212,7 @@ export async function handleStatusMessage(machineId, status) {
  */
 export async function handleResumeMessage(machineId, reason, operatorId = null) {
   const timestamp = new Date();
+  timestamp.setMilliseconds(0);
 
   // 1. Fetch current status of machine
   const [machines] = await db.query('SELECT status FROM machines WHERE id = ?', [machineId]);
@@ -267,6 +270,7 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
  * Closes out any older open status log and opens a new one if status changes.
  */
 async function ensureActiveStatusLog(machineId, targetStatus, timestamp) {
+  if (timestamp) timestamp.setMilliseconds(0);
   // Check if there's already an active log with this status
   const [activeLogs] = await db.query(
     'SELECT * FROM status_logs WHERE machine_id = ? AND end_time IS NULL',
