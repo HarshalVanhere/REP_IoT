@@ -23,28 +23,28 @@ export default function DowntimeReasonModal({ isOpen, onClose, onSubmit, machine
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200 font-sans">
-        
+    <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-50 flex items-center justify-center p-3">
+      <div className="bg-white rounded-2xl border-2 border-slate-200 shadow-2xl w-full max-w-lg max-h-full flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200 font-sans">
+
         {/* Header */}
-        <div className="bg-rose-50 border-b border-rose-100 px-5 py-4 flex items-center gap-3">
-          <div className="bg-rose-150 p-2 rounded-lg text-rose-600">
-            <AlertCircle className="w-5 h-5" />
+        <div className="bg-rose-50 border-b-2 border-rose-100 px-5 py-4 flex items-center gap-3 shrink-0">
+          <div className="bg-rose-100 p-2.5 rounded-xl text-rose-600 shrink-0">
+            <AlertCircle className="w-6 h-6" />
           </div>
-          <div>
-            <h3 className="text-base font-bold text-slate-800 uppercase tracking-wide">Downtime Reason Mandatory</h3>
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Machine: {machineId}</p>
+          <div className="min-w-0">
+            <h3 className="text-lg font-black text-slate-800 uppercase tracking-wide leading-tight">Downtime Reason Mandatory</h3>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono">Machine: {machineId}</p>
           </div>
         </div>
 
         {/* Content Form */}
-        <form onSubmit={handleSubmit} className="p-5 space-y-4">
-          <div className="space-y-2.5">
-            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">
+        <form onSubmit={handleSubmit} className="p-5 space-y-4 flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="space-y-2.5 flex-1 min-h-0 flex flex-col">
+            <label className="text-sm font-black text-slate-500 uppercase tracking-wide block shrink-0">
               Select reason for machine stopped:
             </label>
-            
-            <div className="grid grid-cols-2 gap-3 max-h-[250px] overflow-y-auto pr-1">
+
+            <div className="grid grid-cols-2 gap-3 overflow-y-auto pr-1 flex-1 min-h-0 auto-rows-min">
               {predefinedReasons.map((r) => {
                 const isSelected = reason === r;
                 return (
@@ -55,15 +55,15 @@ export default function DowntimeReasonModal({ isOpen, onClose, onSubmit, machine
                       setReason(r);
                       setError('');
                     }}
-                    className={`p-3 rounded-xl border text-[10px] font-black uppercase tracking-wider text-left transition-all flex items-center justify-between cursor-pointer active:scale-95 ${
+                    className={`min-h-16 p-4 rounded-xl border-2 text-sm font-black uppercase tracking-wide text-left transition-all flex items-center justify-between gap-2 cursor-pointer active:scale-95 ${
                       isSelected
-                        ? 'bg-rose-50 border-rose-550 text-rose-700 shadow-sm'
+                        ? 'bg-rose-50 border-rose-500 text-rose-700 shadow-sm'
                         : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-600'
                     }`}
                   >
-                    <span className="truncate pr-1">{r}</span>
+                    <span className="leading-tight">{r}</span>
                     {isSelected && (
-                      <span className="w-2.5 h-2.5 rounded-full bg-rose-550 shrink-0 ml-1.5" />
+                      <span className="w-3 h-3 rounded-full bg-rose-500 shrink-0" />
                     )}
                   </button>
                 );
@@ -72,27 +72,27 @@ export default function DowntimeReasonModal({ isOpen, onClose, onSubmit, machine
           </div>
 
           {error && (
-            <p className="text-xs font-bold text-rose-650 bg-rose-50 border border-rose-100 p-2.5 rounded-xl flex items-center gap-1.5 leading-snug animate-in fade-in">
+            <p className="text-sm font-bold text-rose-600 bg-rose-50 border-2 border-rose-100 p-3 rounded-xl flex items-center gap-2 leading-snug animate-in fade-in shrink-0">
               ⚠️ {error}
             </p>
           )}
 
-          <p className="text-[9px] font-bold text-slate-400 leading-normal uppercase">
+          <p className="text-xs font-bold text-slate-400 leading-normal uppercase shrink-0">
             * Note: Submitting this log will close out the active downtime duration log in the factory MES database and transition status to running.
           </p>
 
           {/* Action buttons */}
-          <div className="flex gap-3 pt-1">
+          <div className="flex gap-3 pt-1 shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 bg-slate-100 hover:bg-slate-150 border border-slate-200 text-slate-500 py-3 rounded-xl text-xs font-extrabold uppercase transition-all shadow-sm active:scale-95 cursor-pointer"
+              className="flex-1 bg-slate-100 hover:bg-slate-200 border-2 border-slate-200 text-slate-500 py-4 rounded-xl text-base font-extrabold uppercase transition-all shadow-sm active:scale-95 cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl text-xs font-black uppercase transition-all shadow-md active:scale-95 cursor-pointer"
+              className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-4 rounded-xl text-base font-black uppercase transition-all shadow-md active:scale-95 cursor-pointer"
             >
               Submit & Resume
             </button>

@@ -771,14 +771,15 @@ function AppShell() {
           <div className="p-5 border-b border-[var(--grey-200)] flex items-center justify-between">
             <div className="flex items-center gap-3 overflow-hidden">
               {sidebarCollapsed ? (
-                <div className="bg-white p-1 rounded-xl shadow-xs border border-slate-100 shrink-0 flex items-center justify-center">
-                  <img src={jbmLogo} alt="JBM Logo" className="w-8 h-8 object-contain" />
+                <div className="bg-white p-1 rounded-xl shadow-xs border border-slate-100 shrink-0 flex flex-col gap-1 items-center justify-center">
+                  <img src={jbmLogo} alt="JBM Logo" className="w-6 h-6 object-contain" />
+                  <img src={roseLogo} alt="Rose Logo" className="w-6 h-6 object-contain" />
                 </div>
               ) : (
-                <div className="flex items-center gap-2.5 animate-in fade-in duration-200">
-                  <img src={jbmLogo} alt="JBM Logo" className="h-8.5 w-auto object-contain bg-white px-2 py-0.5 rounded-lg border border-slate-100" />
-                  <div className="w-[1px] h-6 bg-slate-300 dark:bg-slate-700"></div>
-                  <img src={roseLogo} alt="Rose Logo" className="h-8.5 w-auto object-contain bg-white px-2 py-0.5 rounded-lg border border-slate-100" />
+                <div className="flex flex-col gap-2 w-fit bg-white p-2 rounded-xl shadow-sm border border-slate-100 animate-in fade-in duration-200">
+                  <img src={jbmLogo} alt="JBM Logo" className="h-8.5 w-auto object-contain" />
+                  <div className="h-[1px] w-full bg-slate-150"></div>
+                  <img src={roseLogo} alt="Rose Logo" className="h-8.5 w-auto object-contain" />
                 </div>
               )}
             </div>

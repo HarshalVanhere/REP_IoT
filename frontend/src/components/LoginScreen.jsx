@@ -58,10 +58,10 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
           <div className="space-y-6">
             {/* JBM Branded Logo Symbol */}
             <div className="flex flex-col gap-4">
-              <div className="flex items-center gap-3.5">
-                <img src={jbmLogo} alt="JBM Logo" className="h-8.5 w-auto object-contain bg-white px-2.5 py-1 rounded-xl shadow-sm border border-slate-100" />
-                <div className="w-[1.5px] h-7 bg-slate-350 dark:bg-slate-700"></div>
-                <img src={roseLogo} alt="Rose Logo" className="h-8.5 w-auto object-contain bg-white px-2.5 py-1 rounded-xl shadow-sm border border-slate-100" />
+              <div className="flex flex-col gap-2.5 w-fit bg-white p-3 rounded-2xl shadow-sm border border-slate-100">
+                <img src={jbmLogo} alt="JBM Logo" className="h-10 w-auto object-contain" />
+                <div className="h-[1px] w-full bg-slate-150"></div>
+                <img src={roseLogo} alt="Rose Logo" className="h-10 w-auto object-contain" />
               </div>
               <div className="text-left">
                 <span className="text-[10px] font-black uppercase tracking-[0.45em] text-[var(--primary)] block leading-none">Smart Factory</span>
