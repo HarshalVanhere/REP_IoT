@@ -473,8 +473,14 @@ async function mockQuery(sql, params = []) {
       if (machine) {
         machine.production_count += 1;
         machine.last_pulse = timestamp;
-        machine.status = 'Running';
-        
+        // Only mirror the real SQL's status clause - do not force Running unconditionally.
+        // handlePulseMessage() intentionally omits "status = 'Running'" from the query when
+        // the machine is deliberately Stopped, and the mock DB must respect that or it will
+        // silently un-stop a machine on every trailing pulse (a real bug this once was).
+        if (sqlLower.includes("status = 'running'")) {
+          machine.status = 'Running';
+        }
+
         if (sqlLower.includes('good_count = good_count + 1') || sqlLower.includes('good_count=good_count+1')) {
           machine.good_count += 1;
         } else if (sqlLower.includes('scrap_count = scrap_count + 1') || sqlLower.includes('scrap_count=scrap_count+1')) {

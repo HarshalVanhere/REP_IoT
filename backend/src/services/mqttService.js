@@ -117,20 +117,40 @@ export async function handlePulseMessage(machineId, payload) {
     [machineId, timestamp, cycleTime, isGood]
   );
 
-  // 3. Update machine metrics in the database
+  // 3. Update machine metrics in the database.
+  // IMPORTANT: do NOT blindly force status back to 'Running' here. A pulse can legitimately
+  // arrive right after an operator/watchdog Stop - the CNC's in-flight cycle finishes and the
+  // ESP32 reports it over serial even though the interlock relay has already been de-energized.
+  // Counting that trailing part is correct; silently flipping the machine back to Running is not
+  // - it would undo an Emergency Stop the moment the residual cycle completes. Only auto-resume
+  // to Running when the machine wasn't deliberately Stopped (e.g. it was Running or reconnecting
+  // from No Signal).
+  const currentStatus = machines[0].status;
   const countField = isGood ? 'good_count' : 'scrap_count';
-  await db.query(
-    `UPDATE machines SET 
-      production_count = production_count + 1, 
-      ${countField} = ${countField} + 1, 
-      last_pulse = ?,
-      status = 'Running'
-     WHERE id = ?`,
-    [timestamp, machineId]
-  );
 
-  // Ensure machine is set to running and has active status log
-  await ensureActiveStatusLog(machineId, 'Running', timestamp);
+  if (currentStatus === 'Stopped') {
+    await db.query(
+      `UPDATE machines SET
+        production_count = production_count + 1,
+        ${countField} = ${countField} + 1,
+        last_pulse = ?
+       WHERE id = ?`,
+      [timestamp, machineId]
+    );
+  } else {
+    await db.query(
+      `UPDATE machines SET
+        production_count = production_count + 1,
+        ${countField} = ${countField} + 1,
+        last_pulse = ?,
+        status = 'Running'
+       WHERE id = ?`,
+      [timestamp, machineId]
+    );
+
+    // Ensure machine is set to running and has active status log
+    await ensureActiveStatusLog(machineId, 'Running', timestamp);
+  }
 
   // 4. Recalculate OEE
   const oeeMetrics = await calculateOEE(machineId);
@@ -208,8 +228,12 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
 
   if (activeLogs.length > 0) {
     const activeLog = activeLogs[0];
+    // Reset synced=FALSE: this row may have already been uploaded to the cloud while it was
+    // still open (no reason yet) - without this, the sync client's "WHERE synced = 0" query
+    // never picks the row up again, and the downtime reason/end_time silently never reaches
+    // the cloud dashboard.
     await db.query(
-      'UPDATE status_logs SET end_time = ?, downtime_reason = ? WHERE id = ?',
+      'UPDATE status_logs SET end_time = ?, downtime_reason = ?, synced = FALSE WHERE id = ?',
       [timestamp, reason, activeLog.id]
     );
   }
@@ -256,9 +280,11 @@ async function ensureActiveStatusLog(machineId, targetStatus, timestamp) {
       return;
     }
     
-    // Status has changed! Close the active log
+    // Status has changed! Close the active log.
+    // Reset synced=FALSE so the corrected end_time re-uploads even if this row already
+    // synced to the cloud while it was still open (see handleResumeMessage for the same fix).
     await db.query(
-      'UPDATE status_logs SET end_time = ? WHERE id = ?',
+      'UPDATE status_logs SET end_time = ?, synced = FALSE WHERE id = ?',
       [timestamp, activeLog.id]
     );
   }

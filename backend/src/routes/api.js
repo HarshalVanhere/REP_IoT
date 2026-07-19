@@ -324,14 +324,16 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
           [pulse.machine_id, new Date(pulse.timestamp), pulse.cycle_time, pulse.is_good]
         );
 
-        // Update machine stats
+        // Update machine stats. Deliberately does NOT force status='Running' - these can be
+        // buffered/historical pulses synced well after the fact, and the statusLogs batch
+        // below is the authoritative source for current machine status. Forcing it here could
+        // flip a machine that is genuinely Stopped back to Running on the cloud dashboard.
         const countField = pulse.is_good ? 'good_count' : 'scrap_count';
         await connection.query(
           `UPDATE machines SET
             production_count = production_count + 1,
             ${countField} = ${countField} + 1,
-            last_pulse = ?,
-            status = 'Running'
+            last_pulse = ?
            WHERE id = ?`,
           [new Date(pulse.timestamp), pulse.machine_id]
         );
