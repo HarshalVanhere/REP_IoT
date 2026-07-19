@@ -128,6 +128,14 @@ function AppShell() {
   const [tempMachine, setTempMachine] = useState('All Machines');
   const [tempDate, setTempDate] = useState('');
 
+  // Kiosk mode: this build is a dedicated shop-floor touchscreen for one machine (served at
+  // /operator). It auto-logs-in as a low-privilege station account so nobody has to type a
+  // password at the machine, while every action still goes through real backend auth/audit -
+  // unlike the old fully-anonymous kiosk, this is a named, revocable, Operator-scoped account.
+  const isKioskMode = typeof window !== 'undefined' &&
+    (window.location.pathname.endsWith('/operator') || window.location.search.includes('view=operator'));
+  const [kioskAutoLoginDone, setKioskAutoLoginDone] = useState(false);
+
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
 
@@ -191,6 +199,36 @@ function AppShell() {
       setActiveView('overview');
     }
   };
+
+  // Kiosk auto-login: only runs once, only in kiosk mode, only if this build was configured
+  // with station credentials (VITE_KIOSK_LOGIN_ID/PASSWORD - set per-Pi, never in the cloud
+  // build). Falls back to the normal manual LoginScreen if unconfigured or if it fails.
+  useEffect(() => {
+    if (!isKioskMode || sessionUser || kioskAutoLoginDone) return;
+
+    const kioskLoginId = import.meta.env.VITE_KIOSK_LOGIN_ID;
+    const kioskPassword = import.meta.env.VITE_KIOSK_PASSWORD;
+
+    if (!kioskLoginId || !kioskPassword) {
+      setKioskAutoLoginDone(true);
+      return;
+    }
+
+    (async () => {
+      try {
+        const data = await apiFetch('/api/auth/login', {
+          method: 'POST',
+          body: { loginId: kioskLoginId, password: kioskPassword }
+        });
+        handleLoginSuccess(data.user, data.token);
+      } catch (err) {
+        console.error('Kiosk auto-login failed:', err.message);
+      } finally {
+        setKioskAutoLoginDone(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isKioskMode, sessionUser, kioskAutoLoginDone]);
 
   const handleLogout = () => {
     setSessionUser(null);
@@ -651,13 +689,17 @@ function AppShell() {
     setFilterModalOpen(false);
   };
 
-  const isKioskMode = typeof window !== 'undefined' && 
-    (window.location.pathname.endsWith('/operator') || window.location.search.includes('view=operator'));
-
-  // The kiosk touchscreen still requires a real login (it controls physical machines) -
-  // there is no anonymous fallback anymore. A tablet stays signed in for the shift under
-  // one Operator account; individual badge sign-on inside OperatorTerminal is informational.
+  // The kiosk touchscreen auto-logs-in (see effect above) instead of showing a login form.
+  // A tablet stays signed in for the shift under one station account; individual badge
+  // sign-on inside OperatorTerminal on top of that is purely informational.
   if (!sessionUser) {
+    if (isKioskMode && !kioskAutoLoginDone) {
+      return (
+        <div className="min-h-screen w-screen bg-slate-950 flex items-center justify-center">
+          <p className="text-slate-500 text-xs font-black uppercase tracking-widest">Connecting to station...</p>
+        </div>
+      );
+    }
     return (
       <LoginScreen
         themeMode={themeMode}

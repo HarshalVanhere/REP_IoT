@@ -114,15 +114,17 @@ function connectSerial(portPath, baudRate) {
         return;
       }
 
-      logger.debug(`🔌 Serial: Received telemetry ->`, payload);
-
       if (payload.type === 'pulse') {
         const cycleTime = parseFloat(payload.cycleTime || 15);
+        logger.info(`🔩 Serial: Pulse received (cycleTime=${cycleTime}s) - recording production count for ${gatewayMachineId}`);
         // Direct integration: 1 pulse = 1 production count
         await handlePulseMessage(gatewayMachineId, { cycleTime, isGood: true });
       } else if (payload.type === 'status') {
         const status = payload.status;
+        logger.info(`🔌 Serial: Status telemetry -> "${status}" for ${gatewayMachineId}`);
         await handleStatusMessage(gatewayMachineId, status);
+      } else {
+        logger.debug(`🔌 Serial: Received unrecognized telemetry ->`, payload);
       }
     } catch (err) {
       logger.warn(`Serial: Failed to parse line: "${trimmed}" - Error: ${err.message}`);
