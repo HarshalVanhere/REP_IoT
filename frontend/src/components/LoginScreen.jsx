@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { ArrowRight, Factory, Lock, LogIn, MoonStar, SunMedium, ShieldAlert, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import jbmLogo from '../assets/jbmlogo (1).png';
+import roseLogo from '../assets/rose logo (1).png';
 
 export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }) {
   const [loginId, setLoginId] = useState('');
@@ -55,13 +57,15 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
         <div className="bg-[var(--secondary2-trans-100)] p-8 flex flex-col justify-between border-r-[1.5px] border-[var(--grey-200)]">
           <div className="space-y-6">
             {/* JBM Branded Logo Symbol */}
-            <div className="flex items-center gap-3">
-              <div className="bg-[var(--primary)] text-white p-3 rounded-2xl shadow-md">
-                <Factory className="w-6 h-6" />
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-3.5">
+                <img src={jbmLogo} alt="JBM Logo" className="h-8.5 w-auto object-contain bg-white px-2.5 py-1 rounded-xl shadow-sm border border-slate-100" />
+                <div className="w-[1.5px] h-7 bg-slate-350 dark:bg-slate-700"></div>
+                <img src={roseLogo} alt="Rose Logo" className="h-8.5 w-auto object-contain bg-white px-2.5 py-1 rounded-xl shadow-sm border border-slate-100" />
               </div>
-              <div>
+              <div className="text-left">
                 <span className="text-[10px] font-black uppercase tracking-[0.45em] text-[var(--primary)] block leading-none">Smart Factory</span>
-                <span className="text-lg font-black tracking-wider text-[var(--grey-900)] uppercase font-mono">JBM Factory-Sync MM</span>
+                <span className="text-sm font-black tracking-wider text-[var(--grey-900)] uppercase font-mono">JBM Factory-Sync MM</span>
               </div>
             </div>
 

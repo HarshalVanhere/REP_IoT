@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Ban, AlertTriangle, Clock, ShieldAlert, KeyRound, LogOut, User } from 'lucide-react';
 import DowntimeReasonModal from './DowntimeReasonModal';
+import jbmLogo from '../assets/jbmlogo (1).png';
+import roseLogo from '../assets/rose logo (1).png';
 
 const SIMULATED_OPERATORS = [
   { id: 'OP-101', name: 'Harsh (Operator 101)' },
@@ -120,8 +122,10 @@ export default function OperatorTerminal({
         (!showManualLogin && assigned_operator && assigned_operator !== 'Unassigned') ? (
           // PPC PRE-ASSIGNED LOGIN MODE
           <div className="flex-1 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-300">
-            <div className="bg-sky-955 text-sky-400 p-6 rounded-full border border-sky-900 mb-6">
-              <User className="w-12 h-12" />
+            <div className="flex items-center gap-3.5 bg-slate-900 border border-slate-800 p-4.5 rounded-3xl shadow-lg mb-8">
+              <img src={jbmLogo} alt="JBM Logo" className="h-10 w-auto object-contain bg-white px-2.5 py-1 rounded-xl border border-slate-100" />
+              <div className="w-[1.5px] h-8 bg-slate-800"></div>
+              <img src={roseLogo} alt="Rose Logo" className="h-10 w-auto object-contain bg-white px-2.5 py-1 rounded-xl border border-slate-100" />
             </div>
             <h3 className="text-2xl font-black text-slate-200 uppercase tracking-widest">Workstation Pre-Planned</h3>
             <p className="text-sm text-slate-400 mt-1.5 uppercase font-bold tracking-wider">Shift details are pre-assigned by PPC planning</p>
@@ -158,8 +162,10 @@ export default function OperatorTerminal({
         ) : (
           // MANUAL SELECTOR DROPDOWN LOGIN MODE
           <div className="flex-1 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-300">
-            <div className="bg-sky-955 text-sky-400 p-6 rounded-full border border-sky-900 mb-6">
-              <KeyRound className="w-12 h-12" />
+            <div className="flex items-center gap-3.5 bg-slate-900 border border-slate-800 p-4.5 rounded-3xl shadow-lg mb-8">
+              <img src={jbmLogo} alt="JBM Logo" className="h-10 w-auto object-contain bg-white px-2.5 py-1 rounded-xl border border-slate-100" />
+              <div className="w-[1.5px] h-8 bg-slate-800"></div>
+              <img src={roseLogo} alt="Rose Logo" className="h-10 w-auto object-contain bg-white px-2.5 py-1 rounded-xl border border-slate-100" />
             </div>
             <h3 className="text-2xl font-black text-slate-200 uppercase tracking-widest">MES Terminal Sign-In</h3>
             <p className="text-sm text-slate-400 mt-1.5 max-w-sm uppercase font-bold tracking-wider">Select operator profile to unlock workstation controls</p>

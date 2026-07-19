@@ -33,6 +33,8 @@ import { ToastProvider, useToast } from './components/Toast';
 import DashboardSkeleton from './components/Skeleton';
 import MachineManagement from './components/MachineManagement';
 import AuditLogView from './components/AuditLogView';
+import jbmLogo from './assets/jbmlogo (1).png';
+import roseLogo from './assets/rose logo (1).png';
 
 // Charting, the historical reports table, and the Excel-export-capable shift planner pull in
 // recharts/xlsx that most sessions never touch (operators live in the kiosk view) - split
@@ -768,13 +770,15 @@ function AppShell() {
           {/* Logo Section */}
           <div className="p-5 border-b border-[var(--grey-200)] flex items-center justify-between">
             <div className="flex items-center gap-3 overflow-hidden">
-              <div className="bg-[var(--primary)] text-white p-3 rounded-2xl shadow-md shrink-0 flex items-center justify-center">
-                <Factory className="w-6 h-6" />
-              </div>
-              {!sidebarCollapsed && (
-                <div className="flex flex-col shrink-0 animate-in fade-in duration-200 text-left">
-                  <span className="text-xs font-black uppercase tracking-[0.45em] text-[var(--primary)] block leading-none">Smart Plant</span>
-                  <span className="text-lg font-black uppercase tracking-wider text-[var(--grey-900)] font-mono leading-tight mt-1">JBM Rep</span>
+              {sidebarCollapsed ? (
+                <div className="bg-white p-1 rounded-xl shadow-xs border border-slate-100 shrink-0 flex items-center justify-center">
+                  <img src={jbmLogo} alt="JBM Logo" className="w-8 h-8 object-contain" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2.5 animate-in fade-in duration-200">
+                  <img src={jbmLogo} alt="JBM Logo" className="h-8.5 w-auto object-contain bg-white px-2 py-0.5 rounded-lg border border-slate-100" />
+                  <div className="w-[1px] h-6 bg-slate-300 dark:bg-slate-700"></div>
+                  <img src={roseLogo} alt="Rose Logo" className="h-8.5 w-auto object-contain bg-white px-2 py-0.5 rounded-lg border border-slate-100" />
                 </div>
               )}
             </div>
