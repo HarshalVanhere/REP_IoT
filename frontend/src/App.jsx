@@ -254,17 +254,19 @@ function AppShell() {
         apiFetch('/api/reason-codes', { token: authToken }).then(setReasonCodes).catch(() => {});
       }
 
-      const historyEntries = await Promise.all(
-        machinesList.map(async (machine) => {
-          const historyList = await apiFetch(`/api/machines/${machine.id}/history`, { token: authToken });
-          return [machine.id, historyList];
-        })
-      );
+      if (!isKioskMode) {
+        const historyEntries = await Promise.all(
+          machinesList.map(async (machine) => {
+            const historyList = await apiFetch(`/api/machines/${machine.id}/history`, { token: authToken });
+            return [machine.id, historyList];
+          })
+        );
 
-      setHistories(Object.fromEntries(historyEntries));
-      await fetchReports();
-      await fetchUserAccounts();
-      await fetchAuditLog();
+        setHistories(Object.fromEntries(historyEntries));
+        await fetchReports();
+        await fetchUserAccounts();
+        await fetchAuditLog();
+      }
     } catch (err) {
       if (!handleAuthError(err)) console.error('Failed to load initial data:', err.message);
     } finally {
@@ -412,6 +414,8 @@ function AppShell() {
   useEffect(() => {
     if (!authToken || !initialLoadComplete) return undefined;
 
+    const intervalTime = isKioskMode ? 1500 : 4000;
+
     const pollInterval = setInterval(() => {
       if (!socketConnected) {
         (async () => {
@@ -423,10 +427,10 @@ function AppShell() {
           }
         })();
       }
-    }, 4000); // Poll every 4 seconds when WebSocket is disconnected
+    }, intervalTime);
 
     return () => clearInterval(pollInterval);
-  }, [authToken, socketConnected, initialLoadComplete]);
+  }, [authToken, socketConnected, initialLoadComplete, isKioskMode]);
 
 
 

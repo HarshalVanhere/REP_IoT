@@ -121,7 +121,11 @@ async function synchronizeData(cloudUrl) {
   const syncEndpoint = `${cloudUrl.replace(/\/$/, '')}/api/sync/data`;
   
   const payload = { pulses, statusLogs };
-  const res = await request(syncEndpoint, { method: 'POST' }, payload);
+  const headers = {};
+  if (process.env.SYNC_API_KEY) {
+    headers['x-sync-key'] = process.env.SYNC_API_KEY;
+  }
+  const res = await request(syncEndpoint, { method: 'POST', headers }, payload);
 
   if (!res.ok) {
     const errorText = await res.text();
