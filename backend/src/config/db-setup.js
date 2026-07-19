@@ -1,7 +1,10 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
+
+const DEFAULT_SEED_PASSWORD_HASH = bcrypt.hashSync('1234', 10);
 
 async function setup() {
   const connectionConfig = {
@@ -93,6 +96,72 @@ async function setup() {
       console.log('   + Added "synced" column to status_logs table');
     } catch (err) {
       // Ignore if column already exists
+    }
+
+    // Create users table
+    console.log('🛠️  Creating "users" table...');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        loginId VARCHAR(50) PRIMARY KEY,
+        role VARCHAR(50) NOT NULL,
+        displayName VARCHAR(100) NOT NULL,
+        terminalId VARCHAR(50) NOT NULL,
+        password_hash VARCHAR(100) NOT NULL DEFAULT ''
+      )
+    `);
+
+    // Create audit_log table
+    console.log('🛠️  Creating "audit_log" table...');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        actor_login_id VARCHAR(50) NOT NULL,
+        action VARCHAR(100) NOT NULL,
+        target VARCHAR(100) NULL,
+        details VARCHAR(500) NULL
+      )
+    `);
+
+    // Create shift_plans table (dated PPC shift scheduling)
+    console.log('🛠️  Creating "shift_plans" table...');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS shift_plans (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        machine_id VARCHAR(50) NOT NULL,
+        plan_date DATE NOT NULL,
+        shift VARCHAR(10) NOT NULL,
+        target INT NOT NULL,
+        ideal_cycle_time INT NOT NULL,
+        part_name VARCHAR(100) NULL,
+        operator VARCHAR(100) NULL,
+        created_by VARCHAR(50) NULL,
+        updated_by VARCHAR(50) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_machine_date_shift (machine_id, plan_date, shift),
+        FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Seed default plant accounts (default password: 1234 - change before go-live)
+    console.log('🌱 Seeding default user accounts...');
+    const seedUsers = [
+      ['SUP-201', 'Supervisor', 'Supervisor User', 'DASHBOARD'],
+      ['PPC-301', 'PPC Engineer', 'PPC Engineer', 'PLANNING-BOARD'],
+      ['ADMIN', 'Admin', 'Admin User', 'CONTROL-ROOM']
+    ];
+    for (const [loginId, role, displayName, terminalId] of seedUsers) {
+      const [existing] = await connection.query('SELECT loginId FROM users WHERE loginId = ?', [loginId]);
+      if (existing.length === 0) {
+        await connection.query(
+          'INSERT INTO users (loginId, role, displayName, terminalId, password_hash) VALUES (?, ?, ?, ?, ?)',
+          [loginId, role, displayName, terminalId, DEFAULT_SEED_PASSWORD_HASH]
+        );
+        console.log(`   + Created user account: ${loginId} (${role})`);
+      } else {
+        console.log(`   - User ${loginId} already exists, skipping.`);
+      }
     }
 
     // Seed machines (8 CNC stations with planning profiles)

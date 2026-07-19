@@ -1,34 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard,
   TabletSmartphone,
-  RefreshCw,
-  Search,
   SlidersHorizontal,
   Factory,
   SunMedium,
   MoonStar,
   ShieldCheck,
-  Radio,
   BarChart3,
-  CircleAlert,
   LogOut,
   ChevronLeft,
   ChevronRight,
   Filter,
-  Calendar,
   X,
-  Compass,
   Cpu,
   Layers,
-  Percent,
   Settings,
   Trophy,
   History,
   UserPlus,
   Users,
   Download,
-  AlertTriangle,
   Flame,
   UserCheck
 } from 'lucide-react';
@@ -36,25 +28,31 @@ import Header from './components/Header';
 import LoginScreen from './components/LoginScreen';
 import SummaryBar from './components/SummaryBar';
 import MachineCard from './components/MachineCard';
-import AnalyticsCharts from './components/AnalyticsCharts';
 import OperatorTerminal from './components/OperatorTerminal';
-import ReportsLog from './components/ReportsLog';
+import { ToastProvider, useToast } from './components/Toast';
+import DashboardSkeleton from './components/Skeleton';
+import MachineManagement from './components/MachineManagement';
+import AuditLogView from './components/AuditLogView';
 
-const DEFAULT_API_URL = import.meta.env.DEV
-  ? 'http://localhost:5000'
-  : (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5000');
-const BACKEND_URL = (import.meta.env.VITE_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
-const WS_URL = (import.meta.env.VITE_WS_URL || BACKEND_URL.replace(/^http/, 'ws')).replace(/\/$/, '');
+// Charting, the historical reports table, and the Excel-export-capable shift planner pull in
+// recharts/xlsx that most sessions never touch (operators live in the kiosk view) - split
+// them out of the main bundle.
+const AnalyticsCharts = lazy(() => import('./components/AnalyticsCharts'));
+const ReportsLog = lazy(() => import('./components/ReportsLog'));
+const ShiftPlanningCalendar = lazy(() => import('./components/ShiftPlanningCalendar'));
+
+function ViewLoadingFallback() {
+  return (
+    <div className="py-24 text-center text-slate-400 font-bold uppercase tracking-widest bg-[var(--white-color)] border border-[var(--grey-200)] rounded-2xl">
+      Loading...
+    </div>
+  );
+}
+import { WS_URL, apiFetch, AuthError } from './lib/api';
 
 const SHIFT_OPTIONS = ['All Shifts', 'Shift A', 'Shift B', 'Shift C'];
 const STATUS_OPTIONS = ['All', 'Running', 'Stopped', 'No Signal'];
 const ROLE_OPTIONS = ['Supervisor', 'PPC Engineer', 'Admin', 'Operator'];
-
-const DEFAULT_ACCOUNTS = [
-  { loginId: 'SUP-201', role: 'Supervisor', displayName: 'Supervisor User', terminalId: 'DASHBOARD' },
-  { loginId: 'PPC-301', role: 'PPC Engineer', displayName: 'PPC Engineer', terminalId: 'PLANNING-BOARD' },
-  { loginId: 'ADMIN', role: 'Admin', displayName: 'Admin User', terminalId: 'CONTROL-ROOM' }
-];
 
 function getShiftFromTimestamp(timestamp) {
   if (!timestamp) return 'Shift A';
@@ -66,7 +64,8 @@ function getShiftFromTimestamp(timestamp) {
   return 'Shift C';
 }
 
-export default function App() {
+function AppShell() {
+  const { showToast } = useToast();
   const [activeView, setActiveView] = useState('overview');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -79,18 +78,28 @@ export default function App() {
   const [machines, setMachines] = useState([]);
   const [histories, setHistories] = useState({});
   const [reports, setReports] = useState([]);
-  const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
+  const [accounts, setAccounts] = useState([]);
+  const [auditLog, setAuditLog] = useState([]);
+  const [reasonCodes, setReasonCodes] = useState([]);
+  const [alerts, setAlerts] = useState([]);
   const [socketConnected, setSocketConnected] = useState(false);
-  
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false);
+
   // User profile CRUD form states (Admin view)
   const [crudLoginId, setCrudLoginId] = useState('');
   const [crudRole, setCrudRole] = useState('Supervisor');
   const [crudDisplayName, setCrudDisplayName] = useState('');
   const [crudTerminalId, setCrudTerminalId] = useState('DASHBOARD');
+  const [crudPassword, setCrudPassword] = useState('');
   const [crudEditing, setCrudEditing] = useState(false);
   const [crudSuccessMsg, setCrudSuccessMsg] = useState('');
   const [crudErrorMsg, setCrudErrorMsg] = useState('');
-  
+
+  const [authToken, setAuthToken] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    return window.localStorage.getItem('rep-iot-token') || null;
+  });
+
   const [sessionUser, setSessionUser] = useState(() => {
     if (typeof window === 'undefined') return null;
     try {
@@ -100,20 +109,18 @@ export default function App() {
       return null;
     }
   });
-  
+
   const [themeMode, setThemeMode] = useState(() => {
     if (typeof window === 'undefined') return 'light';
     return window.localStorage.getItem('rep-iot-theme') || 'light';
   });
   
-  const [operatingMode, setOperatingMode] = useState('Demo Mode');
+  const operatingMode = 'Demo Mode';
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [shiftFilter, setShiftFilter] = useState('All Shifts');
   const [machineFilter, setMachineFilter] = useState('All Machines');
   const [dateFilter, setDateFilter] = useState('');
-  const [planningStates, setPlanningStates] = useState({});
-  const [planningSuccessMsg, setPlanningSuccessMsg] = useState('');
 
   // Local state for modal fields before applying
   const [tempStatus, setTempStatus] = useState('All');
@@ -122,27 +129,7 @@ export default function App() {
   const [tempDate, setTempDate] = useState('');
 
   const wsRef = useRef(null);
-
-  useEffect(() => {
-    if (machines.length > 0) {
-      setPlanningStates((prev) => {
-        const next = { ...prev };
-        machines.forEach((m) => {
-          if (!next[m.id]) {
-            next[m.id] = {
-              selectedShift: 'Shift A',
-              shifts: {
-                'Shift A': { target: m.target, cycleTime: m.ideal_cycle_time, partName: m.active_part_name || '', operator: m.assigned_operator || '' },
-                'Shift B': { target: m.target, cycleTime: m.ideal_cycle_time, partName: m.active_part_name || '', operator: m.assigned_operator || '' },
-                'Shift C': { target: m.target, cycleTime: m.ideal_cycle_time, partName: m.active_part_name || '', operator: m.assigned_operator || '' }
-              }
-            };
-          }
-        });
-        return next;
-      });
-    }
-  }, [machines]);
+  const reconnectTimerRef = useRef(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -152,27 +139,50 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (sessionUser) {
+    if (sessionUser && authToken) {
       window.localStorage.setItem('rep-iot-session', JSON.stringify(sessionUser));
+      window.localStorage.setItem('rep-iot-token', authToken);
     } else {
       window.localStorage.removeItem('rep-iot-session');
+      window.localStorage.removeItem('rep-iot-token');
     }
-  }, [sessionUser]);
+  }, [sessionUser, authToken]);
+
+  // Centralizes "session expired" handling: any API call can throw AuthError and we
+  // land here instead of every call site duplicating logout logic.
+  const handleAuthError = (err) => {
+    if (err instanceof AuthError) {
+      showToast('Your session expired. Please log in again.', 'error');
+      setSessionUser(null);
+      setAuthToken(null);
+      return true;
+    }
+    return false;
+  };
 
   const fetchUserAccounts = async () => {
+    if (sessionUser?.role !== 'Admin') return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/users`);
-      if (res.ok) {
-        const list = await res.json();
-        setAccounts(list.length > 0 ? list : DEFAULT_ACCOUNTS);
-      }
+      const list = await apiFetch('/api/users', { token: authToken });
+      setAccounts(list);
     } catch (err) {
-      console.error('Failed to fetch user profiles:', err.message);
+      if (!handleAuthError(err)) console.error('Failed to fetch user profiles:', err.message);
     }
   };
 
-  const handleLogin = (nextUser) => {
+  const fetchAuditLog = async () => {
+    if (sessionUser?.role !== 'Admin') return;
+    try {
+      const list = await apiFetch('/api/audit-log', { token: authToken });
+      setAuditLog(list);
+    } catch (err) {
+      if (!handleAuthError(err)) console.error('Failed to fetch audit log:', err.message);
+    }
+  };
+
+  const handleLoginSuccess = (nextUser, token) => {
     setSessionUser(nextUser);
+    setAuthToken(token);
     if (nextUser.role === 'PPC Engineer') {
       setActiveView('planning');
     } else if (nextUser.role === 'Operator') {
@@ -184,28 +194,31 @@ export default function App() {
 
   const handleLogout = () => {
     setSessionUser(null);
+    setAuthToken(null);
+    setInitialLoadComplete(false);
   };
 
   const fetchReports = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/reports`);
-      const reportsList = await res.json();
+      const reportsList = await apiFetch('/api/reports', { token: authToken });
       setReports(reportsList);
     } catch (err) {
-      console.error('Failed to fetch reports logs:', err.message);
+      if (!handleAuthError(err)) console.error('Failed to fetch reports logs:', err.message);
     }
   };
 
   const loadInitialData = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/machines`);
-      const machinesList = await res.json();
+      const machinesList = await apiFetch('/api/machines', { token: authToken });
       setMachines(machinesList);
+
+      if (reasonCodes.length === 0) {
+        apiFetch('/api/reason-codes', { token: authToken }).then(setReasonCodes).catch(() => {});
+      }
 
       const historyEntries = await Promise.all(
         machinesList.map(async (machine) => {
-          const histRes = await fetch(`${BACKEND_URL}/api/machines/${machine.id}/history`);
-          const historyList = await histRes.json();
+          const historyList = await apiFetch(`/api/machines/${machine.id}/history`, { token: authToken });
           return [machine.id, historyList];
         })
       );
@@ -213,16 +226,21 @@ export default function App() {
       setHistories(Object.fromEntries(historyEntries));
       await fetchReports();
       await fetchUserAccounts();
+      await fetchAuditLog();
     } catch (err) {
-      console.error('Failed to load initial data:', err.message);
+      if (!handleAuthError(err)) console.error('Failed to load initial data:', err.message);
+    } finally {
+      setInitialLoadComplete(true);
     }
   };
 
   useEffect(() => {
+    if (!authToken) return undefined;
+
     loadInitialData();
 
     const connectWebSocket = () => {
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(authToken)}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -301,8 +319,7 @@ export default function App() {
             // Refresh logs and history as sync data has arrived
             const fetchUpdatedHistory = async () => {
               try {
-                const histRes = await fetch(`${BACKEND_URL}/api/machines/${machineId}/history`);
-                const historyList = await histRes.json();
+                const historyList = await apiFetch(`/api/machines/${machineId}/history`, { token: authToken });
                 setHistories((prev) => ({
                   ...prev,
                   [machineId]: historyList
@@ -314,14 +331,25 @@ export default function App() {
             fetchUpdatedHistory();
             fetchReports();
           }
+
+          if (data.type === 'ALERT') {
+            setAlerts((prev) => [{ id: Date.now() + Math.random(), ...data }, ...prev].slice(0, 50));
+            showToast(data.message, data.severity === 'critical' ? 'error' : 'warning');
+          }
         } catch (err) {
           console.error('Error parsing WebSocket message:', err.message);
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setSocketConnected(false);
-        setTimeout(connectWebSocket, 3000);
+        // 4001 = server rejected an invalid/expired token - don't hammer it with retries,
+        // the user needs to log in again instead.
+        if (event.code === 4001) {
+          handleLogout();
+          return;
+        }
+        reconnectTimerRef.current = setTimeout(connectWebSocket, 3000);
       };
 
       ws.onerror = (err) => {
@@ -333,114 +361,114 @@ export default function App() {
     connectWebSocket();
 
     return () => {
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close();
       }
     };
-  }, []);
+    // Intentionally only re-runs when authToken changes - loadInitialData/fetchReports/showToast
+    // are stable enough in practice and including them would reconnect the socket every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authToken]);
 
 
 
   const handleStopMachine = async (machineId) => {
     try {
-      await fetch(`${BACKEND_URL}/api/machines/${machineId}/stop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
+      await apiFetch(`/api/machines/${machineId}/stop`, { method: 'POST', token: authToken });
     } catch (err) {
-      console.error(`Failed to stop machine ${machineId}:`, err.message);
+      if (!handleAuthError(err)) {
+        console.error(`Failed to stop machine ${machineId}:`, err.message);
+        showToast(err.message || `Failed to stop machine ${machineId}`, 'error');
+      }
     }
   };
 
   const handleResumeMachine = async (machineId, reason, operatorId) => {
     try {
-      await fetch(`${BACKEND_URL}/api/machines/${machineId}/resume`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason, operatorId })
-      });
+      await apiFetch(`/api/machines/${machineId}/resume`, { method: 'POST', token: authToken, body: { reason, operatorId } });
     } catch (err) {
-      console.error(`Failed to resume machine ${machineId}:`, err.message);
+      if (!handleAuthError(err)) {
+        console.error(`Failed to resume machine ${machineId}:`, err.message);
+        showToast(err.message || `Failed to resume machine ${machineId}`, 'error');
+      }
     }
   };
 
-  // User Profile CRUD Handlers
+  // User Profile CRUD Handlers (Admin only - enforced server-side too)
+  const [pendingDeleteLoginId, setPendingDeleteLoginId] = useState(null);
+
   const handleAddUser = async (e) => {
     e.preventDefault();
-    if (!crudLoginId || !crudDisplayName) {
-      setCrudErrorMsg('Display Name and Login ID are required.');
+    if (!crudLoginId || !crudDisplayName || !crudPassword) {
+      setCrudErrorMsg('Display Name, Login ID, and Password are required.');
       return;
     }
-    
+
     try {
-      const res = await fetch(`${BACKEND_URL}/api/users`, {
+      await apiFetch('/api/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          loginId: crudLoginId,
-          role: crudRole,
-          displayName: crudDisplayName,
-          terminalId: crudTerminalId
-        })
+        token: authToken,
+        body: { loginId: crudLoginId, role: crudRole, displayName: crudDisplayName, terminalId: crudTerminalId, password: crudPassword }
       });
-      const data = await res.json();
-      if (res.ok) {
-        setCrudSuccessMsg(`User profile ${crudLoginId} created successfully!`);
-        setCrudLoginId('');
-        setCrudDisplayName('');
-        setCrudErrorMsg('');
-        fetchUserAccounts();
-        setTimeout(() => setCrudSuccessMsg(''), 4000);
-      } else {
-        setCrudErrorMsg(data.error || 'Failed to create user profile.');
-      }
+      setCrudSuccessMsg(`User profile ${crudLoginId} created successfully!`);
+      setCrudLoginId('');
+      setCrudDisplayName('');
+      setCrudPassword('');
+      setCrudErrorMsg('');
+      fetchUserAccounts();
+      fetchAuditLog();
+      setTimeout(() => setCrudSuccessMsg(''), 4000);
     } catch (err) {
-      setCrudErrorMsg('Connection error creating profile.');
+      if (!handleAuthError(err)) setCrudErrorMsg(err.message || 'Failed to create user profile.');
     }
   };
 
   const handleUpdateUser = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${BACKEND_URL}/api/users/${crudLoginId}`, {
+      await apiFetch(`/api/users/${crudLoginId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          role: crudRole,
-          displayName: crudDisplayName,
-          terminalId: crudTerminalId
-        })
+        token: authToken,
+        body: { role: crudRole, displayName: crudDisplayName, terminalId: crudTerminalId, ...(crudPassword ? { password: crudPassword } : {}) }
       });
-      if (res.ok) {
-        setCrudSuccessMsg(`User profile ${crudLoginId} updated successfully!`);
-        setCrudLoginId('');
-        setCrudDisplayName('');
-        setCrudEditing(false);
-        setCrudErrorMsg('');
-        fetchUserAccounts();
-        setTimeout(() => setCrudSuccessMsg(''), 4000);
-      }
+      setCrudSuccessMsg(`User profile ${crudLoginId} updated successfully!`);
+      setCrudLoginId('');
+      setCrudDisplayName('');
+      setCrudPassword('');
+      setCrudEditing(false);
+      setCrudErrorMsg('');
+      fetchUserAccounts();
+      fetchAuditLog();
+      setTimeout(() => setCrudSuccessMsg(''), 4000);
     } catch (err) {
-      setCrudErrorMsg('Failed to update profile.');
+      if (!handleAuthError(err)) setCrudErrorMsg(err.message || 'Failed to update profile.');
     }
   };
 
-  const handleDeleteUser = async (loginId) => {
+  const handleDeleteUser = (loginId) => {
     if (loginId === 'ADMIN') {
-      alert('Default ADMIN account cannot be deleted.');
+      showToast('The default ADMIN account cannot be deleted.', 'error');
       return;
     }
-    if (!confirm(`Are you sure you want to delete profile ${loginId}?`)) return;
-    
+    setPendingDeleteLoginId(loginId);
+  };
+
+  const confirmDeleteUser = async () => {
+    const loginId = pendingDeleteLoginId;
+    setPendingDeleteLoginId(null);
+    if (!loginId) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/users/${loginId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setCrudSuccessMsg(`User profile ${loginId} deleted successfully.`);
-        fetchUserAccounts();
-        setTimeout(() => setCrudSuccessMsg(''), 4000);
-      }
+      await apiFetch(`/api/users/${loginId}`, { method: 'DELETE', token: authToken });
+      setCrudSuccessMsg(`User profile ${loginId} deleted successfully.`);
+      fetchUserAccounts();
+      fetchAuditLog();
+      setTimeout(() => setCrudSuccessMsg(''), 4000);
     } catch (err) {
-      console.error('Failed to delete user profile:', err.message);
+      if (!handleAuthError(err)) {
+        console.error('Failed to delete user profile:', err.message);
+        showToast(err.message || 'Failed to delete user profile.', 'error');
+      }
     }
   };
 
@@ -449,6 +477,7 @@ export default function App() {
     setCrudRole(user.role);
     setCrudDisplayName(user.displayName);
     setCrudTerminalId(user.terminalId);
+    setCrudPassword('');
     setCrudEditing(true);
   };
 
@@ -570,7 +599,6 @@ export default function App() {
   });
 
   const filteredReports = reports.filter((report) => {
-    const reportMachine = machines.find((machine) => machine.id === report.machine_id);
     const reportShift = getShiftFromTimestamp(report.start_time);
     const reportDate = report.start_time ? new Date(report.start_time).toISOString().slice(0, 10) : '';
 
@@ -626,6 +654,19 @@ export default function App() {
   const isKioskMode = typeof window !== 'undefined' && 
     (window.location.pathname.endsWith('/operator') || window.location.search.includes('view=operator'));
 
+  // The kiosk touchscreen still requires a real login (it controls physical machines) -
+  // there is no anonymous fallback anymore. A tablet stays signed in for the shift under
+  // one Operator account; individual badge sign-on inside OperatorTerminal is informational.
+  if (!sessionUser) {
+    return (
+      <LoginScreen
+        themeMode={themeMode}
+        onToggleTheme={() => setThemeMode((mode) => (mode === 'light' ? 'dark' : 'light'))}
+        onLoginSuccess={handleLoginSuccess}
+      />
+    );
+  }
+
   if (isKioskMode) {
     return (
       <div className="min-h-screen w-screen bg-slate-950 overflow-hidden m-0 p-0">
@@ -634,20 +675,10 @@ export default function App() {
           onStopMachine={handleStopMachine}
           onResumeMachine={handleResumeMachine}
           operatingMode={operatingMode}
-          sessionUser={sessionUser || { loginId: 'KIOSK-1313', role: 'Operator', displayName: 'Station 1313 Operator', terminalId: '1313' }}
+          sessionUser={sessionUser}
+          reasonCodes={reasonCodes}
         />
       </div>
-    );
-  }
-
-  if (!sessionUser) {
-    return (
-      <LoginScreen
-        accounts={accounts}
-        themeMode={themeMode}
-        onToggleTheme={() => setThemeMode((mode) => (mode === 'light' ? 'dark' : 'light'))}
-        onLogin={handleLogin}
-      />
     );
   }
 
@@ -781,6 +812,36 @@ export default function App() {
                 {!sidebarCollapsed && <span>User Profiles</span>}
               </button>
             )}
+
+            {/* 8. Machine Management CRUD (Admin only) */}
+            {sessionUser.role === 'Admin' && (
+              <button
+                onClick={() => { setActiveView('machine-admin'); setMobileSidebarOpen(false); }}
+                className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
+                  activeView === 'machine-admin'
+                    ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`}
+              >
+                <Settings className="w-5 h-5 shrink-0" />
+                {!sidebarCollapsed && <span>Machine Management</span>}
+              </button>
+            )}
+
+            {/* 9. Audit Log (Admin only) */}
+            {sessionUser.role === 'Admin' && (
+              <button
+                onClick={() => { setActiveView('audit'); setMobileSidebarOpen(false); }}
+                className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
+                  activeView === 'audit'
+                    ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`}
+              >
+                <ShieldCheck className="w-5 h-5 shrink-0" />
+                {!sidebarCollapsed && <span>Audit Log</span>}
+              </button>
+            )}
           </nav>
         </div>
 
@@ -817,15 +878,22 @@ export default function App() {
       {/* 2. MAIN PANEL */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Header */}
-        <Header 
-          socketConnected={socketConnected} 
-          sessionUser={sessionUser} 
+        <Header
+          socketConnected={socketConnected}
+          sessionUser={sessionUser}
           onToggleMobileSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
+          alerts={alerts}
+          onDismissAlert={(id) => setAlerts((prev) => prev.filter((a) => a.id !== id))}
+          onClearAlerts={() => setAlerts([])}
         />
 
         {/* Main Body with generous spacing */}
         <main className="flex-1 p-8 space-y-8 overflow-y-auto">
-          
+
+          {!initialLoadComplete ? (
+            <DashboardSkeleton />
+          ) : (
+          <>
           {/* VIEW CONDITIONAL SWITCH */}
           {activeView === 'overview' ? (
             // 1. Dashboard Overview Landing Page
@@ -1092,7 +1160,9 @@ export default function App() {
             // 3. Analytics charts separated to prevent visual clutter
             <div className="space-y-8 w-full animate-in fade-in duration-200">
               {filteredMachines.length > 0 ? (
-                <AnalyticsCharts machines={filteredMachines} />
+                <Suspense fallback={<ViewLoadingFallback />}>
+                  <AnalyticsCharts machines={filteredMachines} reasonCodes={reasonCodes} />
+                </Suspense>
               ) : (
                 <div className="py-24 text-center text-slate-400 font-bold uppercase tracking-widest bg-[var(--white-color)] border border-[var(--grey-200)] rounded-2xl">
                   No active machines found to chart.
@@ -1100,176 +1170,16 @@ export default function App() {
               )}
             </div>
           ) : activeView === 'planning' ? (
-            // 4. Planning Board view
-            <div className="space-y-8 w-full animate-in fade-in duration-200 text-left">
-              <div className="jbm-card p-6">
-                <div className="flex items-center gap-3 pb-4 border-b border-[var(--grey-200)] mb-6">
-                  <Factory className="w-6 h-6 text-[var(--primary)] shrink-0" />
-                  <div>
-                    <h3 className="text-base font-black text-[var(--grey-900)] uppercase tracking-wider">PPC Shift Planner</h3>
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">Shift-wise targeting limits, cycle bounds, and operator rosters</p>
-                  </div>
-                </div>
-                
-                {planningSuccessMsg && (
-                  <div className="mb-6 bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-bold px-4 py-2.5 rounded-xl uppercase tracking-wider">
-                    🎉 {planningSuccessMsg}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                  {machines.map((m) => {
-                    const state = planningStates[m.id] || { 
-                      selectedShift: 'Shift A',
-                      shifts: {
-                        'Shift A': { target: m.target, cycleTime: m.ideal_cycle_time, partName: m.active_part_name || '', operator: m.assigned_operator || '' },
-                        'Shift B': { target: m.target, cycleTime: m.ideal_cycle_time, partName: m.active_part_name || '', operator: m.assigned_operator || '' },
-                        'Shift C': { target: m.target, cycleTime: m.ideal_cycle_time, partName: m.active_part_name || '', operator: m.assigned_operator || '' }
-                      }
-                    };
-                    const activeShiftPlan = state.shifts[state.selectedShift] || state.shifts['Shift A'];
-
-                    return (
-                      <div key={m.id} className="p-5 bg-[var(--bg-color-page)]/50 border border-[var(--grey-200)] rounded-2xl flex flex-col gap-4">
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm font-black text-[var(--grey-900)] truncate w-36 text-left">{m.name}</span>
-                          <select
-                            value={state.selectedShift}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setPlanningStates(prev => ({
-                                ...prev,
-                                [m.id]: { ...prev[m.id], selectedShift: val }
-                              }));
-                            }}
-                            className="text-xs font-black bg-[var(--white-color)] border border-[var(--grey-200)] rounded-lg px-2 py-1 outline-none text-[var(--primary)] font-mono"
-                          >
-                            <option value="Shift A">Shift A</option>
-                            <option value="Shift B">Shift B</option>
-                            <option value="Shift C">Shift C</option>
-                          </select>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3 text-left">
-                          <div>
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-wider block mb-1">Target</label>
-                            <input
-                              type="number"
-                              value={activeShiftPlan.target || 0}
-                              onChange={(e) => {
-                                const val = parseInt(e.target.value) || 0;
-                                setPlanningStates(prev => ({
-                                  ...prev,
-                                  [m.id]: {
-                                    ...prev[m.id],
-                                    shifts: {
-                                      ...prev[m.id].shifts,
-                                      [state.selectedShift]: { ...prev[m.id].shifts[state.selectedShift], target: val }
-                                    }
-                                  }
-                                }));
-                              }}
-                              className="w-full bg-[var(--white-color)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl p-2.5 font-bold text-sm outline-none text-center"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-wider block mb-1">Cycle Time (s)</label>
-                            <input
-                              type="number"
-                              value={activeShiftPlan.cycleTime || 0}
-                              onChange={(e) => {
-                                const val = parseFloat(e.target.value) || 0;
-                                setPlanningStates(prev => ({
-                                  ...prev,
-                                  [m.id]: {
-                                    ...prev[m.id],
-                                    shifts: {
-                                      ...prev[m.id].shifts,
-                                      [state.selectedShift]: { ...prev[m.id].shifts[state.selectedShift], cycleTime: val }
-                                    }
-                                  }
-                                }));
-                              }}
-                              className="w-full bg-[var(--white-color)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl p-2.5 font-bold text-sm outline-none text-center"
-                            />
-                          </div>
-                          <div className="col-span-2">
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-wider block mb-1">Part Name</label>
-                            <input
-                              type="text"
-                              value={activeShiftPlan.partName || ''}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setPlanningStates(prev => ({
-                                  ...prev,
-                                  [m.id]: {
-                                    ...prev[m.id],
-                                    shifts: {
-                                      ...prev[m.id].shifts,
-                                      [state.selectedShift]: { ...prev[m.id].shifts[state.selectedShift], partName: val }
-                                    }
-                                  }
-                                }));
-                              }}
-                              className="w-full bg-[var(--white-color)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl p-2.5 font-bold text-sm outline-none"
-                            />
-                          </div>
-                          <div className="col-span-2">
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-wider block mb-1">Operator</label>
-                            <input
-                              type="text"
-                              value={activeShiftPlan.operator || ''}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setPlanningStates(prev => ({
-                                  ...prev,
-                                  [m.id]: {
-                                    ...prev[m.id],
-                                    shifts: {
-                                      ...prev[m.id].shifts,
-                                      [state.selectedShift]: { ...prev[m.id].shifts[state.selectedShift], operator: val }
-                                    }
-                                  }
-                                }));
-                              }}
-                              className="w-full bg-[var(--white-color)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl p-2.5 font-bold text-sm outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            try {
-                              const res = await fetch(`${BACKEND_URL}/api/machines/${m.id}/planning`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                  target: activeShiftPlan.target,
-                                  ideal_cycle_time: activeShiftPlan.cycleTime,
-                                  active_part_name: activeShiftPlan.partName,
-                                  assigned_operator: activeShiftPlan.operator,
-                                  shift: state.selectedShift
-                                })
-                              });
-                              if (res.ok) {
-                                setPlanningSuccessMsg(`Shift plan updated for ${m.id} - ${state.selectedShift}`);
-                                setTimeout(() => setPlanningSuccessMsg(''), 4000);
-                                loadInitialData();
-                              }
-                            } catch (err) {
-                              console.error('Failed to apply PPC planning:', err.message);
-                            }
-                          }}
-                          className="w-full bg-[var(--primary)] text-white text-xs font-black uppercase tracking-wider py-3 rounded-xl border border-[var(--primary)]/15 transition active:scale-95 mt-1"
-                        >
-                          Save Plan
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+            // 4. Dated shift planning calendar (PPC scheduling, history, target-vs-actual, Excel export)
+            <div className="w-full animate-in fade-in duration-200 text-left">
+              <Suspense fallback={<ViewLoadingFallback />}>
+                <ShiftPlanningCalendar
+                  authToken={authToken}
+                  machines={machines}
+                  sessionUser={sessionUser}
+                  onAuthError={handleAuthError}
+                />
+              </Suspense>
             </div>
           ) : activeView === 'reports' ? (
             // 5. Historical logs and download reports view
@@ -1289,7 +1199,9 @@ export default function App() {
                     <Download className="w-3 h-3 text-[var(--primary)]" /> Export OEE Performance
                   </button>
                 </div>
-                <ReportsLog reports={filteredReports} machines={machines} currentUser={sessionUser} onRefresh={fetchReports} />
+                <Suspense fallback={<ViewLoadingFallback />}>
+                  <ReportsLog reports={filteredReports} machines={machines} currentUser={sessionUser} onRefresh={fetchReports} />
+                </Suspense>
               </div>
             </div>
           ) : activeView === 'users' ? (
@@ -1353,6 +1265,19 @@ export default function App() {
                     </select>
                   </div>
 
+                  <div>
+                    <label className="block text-[11px] font-black uppercase tracking-wider text-slate-455 mb-1.5">
+                      Password {crudEditing && <span className="normal-case font-semibold text-slate-400">(leave blank to keep current)</span>}
+                    </label>
+                    <input
+                      type="password"
+                      value={crudPassword}
+                      onChange={(e) => setCrudPassword(e.target.value)}
+                      placeholder={crudEditing ? 'New password (optional)' : 'Set initial password'}
+                      className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] text-[var(--grey-900)] rounded-xl py-3 px-3 text-xs font-bold outline-none"
+                    />
+                  </div>
+
                   {crudSuccessMsg && (
                     <div className="bg-emerald-50 text-emerald-700 text-xs font-bold px-3 py-2 rounded-xl border border-emerald-100 uppercase tracking-wider">
                       {crudSuccessMsg}
@@ -1373,6 +1298,7 @@ export default function App() {
                           setCrudEditing(false);
                           setCrudLoginId('');
                           setCrudDisplayName('');
+                          setCrudPassword('');
                         }}
                         className="flex-1 py-2.5 px-3 rounded-xl border border-slate-200 text-slate-500 font-extrabold text-xs uppercase tracking-wider hover:bg-slate-50"
                       >
@@ -1448,8 +1374,23 @@ export default function App() {
               </div>
 
             </div>
+          ) : activeView === 'machine-admin' ? (
+            // 7. Machine Management (Admin only)
+            <div className="animate-in fade-in duration-200 text-left">
+              <MachineManagement
+                machines={machines}
+                authToken={authToken}
+                onRefresh={loadInitialData}
+                onAuthError={handleAuthError}
+              />
+            </div>
+          ) : activeView === 'audit' ? (
+            // 8. Audit Log (Admin only)
+            <div className="animate-in fade-in duration-200 text-left">
+              <AuditLogView entries={auditLog} onRefresh={fetchAuditLog} />
+            </div>
           ) : (
-            // 7. Operator terminal layout view
+            // 9. Operator terminal layout view
             <div className="space-y-4 animate-in fade-in duration-200 w-full text-left">
               <div className="jbm-card p-5 bg-gradient-to-r from-[var(--primary)] to-indigo-700 text-white shadow-lg border-none flex flex-col md:flex-row md:items-center justify-between gap-4 select-none">
                 <div>
@@ -1475,8 +1416,11 @@ export default function App() {
                 onResumeMachine={handleResumeMachine}
                 operatingMode={operatingMode}
                 sessionUser={sessionUser}
+                reasonCodes={reasonCodes}
               />
             </div>
+          )}
+          </>
           )}
 
         </main>
@@ -1568,6 +1512,40 @@ export default function App() {
         </div>
       )}
 
+      {/* Delete User Confirmation Dialog (replaces browser confirm()) */}
+      {pendingDeleteLoginId && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-[var(--white-color)] rounded-2xl border border-[var(--grey-200)] shadow-2xl w-full max-w-sm p-6 text-left">
+            <h4 className="text-sm font-black uppercase tracking-wider text-[var(--grey-900)]">Delete User Profile?</h4>
+            <p className="text-sm text-slate-500 mt-2">
+              This will permanently remove <strong className="text-[var(--grey-900)]">{pendingDeleteLoginId}</strong>. This action cannot be undone.
+            </p>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setPendingDeleteLoginId(null)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-500 font-extrabold text-xs uppercase tracking-wider hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeleteUser}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs uppercase tracking-wider shadow-sm transition active:scale-95"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ToastProvider>
+      <AppShell />
+    </ToastProvider>
   );
 }

@@ -2,6 +2,7 @@ import db from '../config/db.js';
 import http from 'http';
 import https from 'https';
 import { URL } from 'url';
+import { logger } from '../utils/logger.js';
 
 let syncIntervalId = null;
 let isSyncing = false; // Prevent overlapping runs
@@ -69,16 +70,16 @@ export function startSyncService() {
   const cloudUrl = process.env.CLOUD_BACKEND_URL;
 
   if (!isEdgeGateway) {
-    console.log('☁️  Running in Cloud Mode (Local Sync Client Disabled)');
+    logger.info('☁️  Running in Cloud Mode (Local Sync Client Disabled)');
     return;
   }
 
   if (!cloudUrl) {
-    console.error('❌ Sync service error: CLOUD_BACKEND_URL is not set!');
+    logger.error('❌ Sync service error: CLOUD_BACKEND_URL is not set!');
     return;
   }
 
-  console.log(`📠 Running in Edge Gateway Mode. Syncing to: ${cloudUrl}`);
+  logger.info(`📠 Running in Edge Gateway Mode. Syncing to: ${cloudUrl}`);
 
   // Run synchronization check every 5 seconds
   syncIntervalId = setInterval(async () => {
@@ -89,7 +90,7 @@ export function startSyncService() {
       await synchronizeData(cloudUrl);
     } catch (err) {
       // Log errors quietly to avoid bloating console in offline mode
-      console.warn(`🔄 Sync offline: Cloud unavailable (${err.message})`);
+      logger.warn(`🔄 Sync offline: Cloud unavailable (${err.message})`);
     } finally {
       isSyncing = false;
     }
@@ -114,7 +115,7 @@ async function synchronizeData(cloudUrl) {
     return; // Nothing to sync
   }
 
-  console.log(`🔄 Sync: Found ${pulses.length} pulses and ${statusLogs.length} status logs to upload...`);
+  logger.info(`🔄 Sync: Found ${pulses.length} pulses and ${statusLogs.length} status logs to upload...`);
 
   // 3. Post to the cloud backend sync endpoint
   const syncEndpoint = `${cloudUrl.replace(/\/$/, '')}/api/sync/data`;
@@ -128,7 +129,7 @@ async function synchronizeData(cloudUrl) {
   }
 
   const result = await res.json();
-  console.log(`✅ Sync: Uploaded batch. Cloud response:`, result);
+  logger.info(`✅ Sync: Uploaded batch. Cloud response:`, result);
 
   // 4. Mark uploaded data as synced in local DB
   if (pulses.length > 0) {

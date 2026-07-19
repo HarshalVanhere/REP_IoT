@@ -2,10 +2,20 @@ import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import db from '../config/db.js';
 import { handlePulseMessage, handleStatusMessage } from './mqttService.js';
+import { logger } from '../utils/logger.js';
 
 let portInstance = null;
 let reconnectTimer = null;
 const pendingAcks = new Map(); // command -> { resolve, reject, timeout }
+
+/**
+ * Each Pi + ESP32 edge gateway is wired to exactly one physical machine, identified by
+ * this env var. This is what lets the same code run unmodified on every deployed gateway -
+ * only the .env changes per machine, never the source.
+ */
+function getGatewayMachineId() {
+  return process.env.GATEWAY_MACHINE_ID;
+}
 
 /**
  * Starts the Serial port listener on the Edge Gateway
@@ -16,11 +26,16 @@ export function startSerialListener() {
   const baudRate = parseInt(process.env.SERIAL_BAUD || '115200');
 
   if (!isEdgeGateway) {
-    console.log('☁️  Running in Cloud Mode (Serial Listener Disabled)');
+    logger.info('☁️  Running in Cloud Mode (Serial Listener Disabled)');
     return;
   }
 
-  console.log(`🔌 Attempting to open Serial Port: ${portPath} @ ${baudRate} baud`);
+  if (!getGatewayMachineId()) {
+    logger.error('IS_EDGE_GATEWAY=true but GATEWAY_MACHINE_ID is not set. This gateway does not know which machine it is wired to. Serial listener will not start.');
+    return;
+  }
+
+  logger.info(`🔌 Attempting to open Serial Port: ${portPath} @ ${baudRate} baud for machine ${getGatewayMachineId()}`);
   connectSerial(portPath, baudRate);
 }
 
@@ -42,29 +57,33 @@ function connectSerial(portPath, baudRate) {
   // Use Readline parser to read data line-by-line
   const parser = portInstance.pipe(new ReadlineParser({ delimiter: '\r\n' }));
 
+  const gatewayMachineId = getGatewayMachineId();
+
   portInstance.open(async (err) => {
     if (err) {
-      console.warn(`❌ Serial: Failed to open port ${portPath}: ${err.message}. Retrying in 5 seconds...`);
-      await handleStatusMessage("1313", "No Signal");
+      logger.warn(`Serial: Failed to open port ${portPath}: ${err.message}. Retrying in 5 seconds...`);
+      await handleStatusMessage(gatewayMachineId, "No Signal");
       scheduleReconnect(portPath, baudRate);
       return;
     }
-    console.log(`✅ Serial: Port ${portPath} opened successfully.`);
+    logger.info(`✅ Serial: Port ${portPath} opened successfully.`);
 
     // Boot Sync: Retrieve the last known database status and ensure ESP32 relay matches it
     try {
-      const [rows] = await db.query('SELECT status FROM machines WHERE id = "1313"');
+      const [rows] = await db.query('SELECT status FROM machines WHERE id = ?', [gatewayMachineId]);
       if (rows.length > 0) {
         const dbStatus = rows[0].status;
-        console.log(`🔌 Serial Boot Sync: Syncing interlock to match DB state "${dbStatus}"`);
+        logger.info(`🔌 Serial Boot Sync: Syncing interlock to match DB state "${dbStatus}"`);
         if (dbStatus === 'Running') {
-          sendSerialCommand("1313", "resume");
+          sendSerialCommand(gatewayMachineId, "resume");
         } else {
-          sendSerialCommand("1313", "stop");
+          sendSerialCommand(gatewayMachineId, "stop");
         }
+      } else {
+        logger.error(`Serial Boot Sync: Machine "${gatewayMachineId}" (GATEWAY_MACHINE_ID) does not exist in the database.`);
       }
     } catch (dbErr) {
-      console.error('❌ Serial Boot Sync: Failed to query DB status:', dbErr.message);
+      logger.error('Serial Boot Sync: Failed to query DB status:', dbErr.message);
     }
   });
 
@@ -75,10 +94,10 @@ function connectSerial(portPath, baudRate) {
 
     try {
       const payload = JSON.parse(trimmed);
-      
+
       // If it is a log confirmation message from the ESP32
       if (payload.type === 'log') {
-        console.log(`📠 Serial: [ESP32 LOG] ${payload.message}`);
+        logger.debug(`📠 Serial: [ESP32 LOG] ${payload.message}`);
         return;
       }
 
@@ -89,37 +108,37 @@ function connectSerial(portPath, baudRate) {
         if (pending) {
           clearTimeout(pending.timeout);
           pendingAcks.delete(command);
-          console.log(`✅ Serial: Command "${command}" acknowledged by ESP32.`);
+          logger.info(`✅ Serial: Command "${command}" acknowledged by ESP32.`);
           pending.resolve(payload);
         }
         return;
       }
 
-      console.log(`🔌 Serial: Received telemetry ->`, payload);
+      logger.debug(`🔌 Serial: Received telemetry ->`, payload);
 
       if (payload.type === 'pulse') {
         const cycleTime = parseFloat(payload.cycleTime || 15);
         // Direct integration: 1 pulse = 1 production count
-        await handlePulseMessage("1313", { cycleTime, isGood: true });
+        await handlePulseMessage(gatewayMachineId, { cycleTime, isGood: true });
       } else if (payload.type === 'status') {
         const status = payload.status;
-        await handleStatusMessage("1313", status);
+        await handleStatusMessage(gatewayMachineId, status);
       }
     } catch (err) {
-      console.warn(`⚠️  Serial: Failed to parse line: "${trimmed}" - Error: ${err.message}`);
+      logger.warn(`Serial: Failed to parse line: "${trimmed}" - Error: ${err.message}`);
     }
   });
 
   // Handle port close
   portInstance.on('close', async () => {
-    console.warn(`❌ Serial: Port ${portPath} closed. Attempting reconnect in 5 seconds...`);
-    await handleStatusMessage("1313", "No Signal");
+    logger.warn(`Serial: Port ${portPath} closed. Attempting reconnect in 5 seconds...`);
+    await handleStatusMessage(gatewayMachineId, "No Signal");
     scheduleReconnect(portPath, baudRate);
   });
 
   // Handle port errors
   portInstance.on('error', (err) => {
-    console.error(`⚠️  Serial Error on port ${portPath}:`, err.message);
+    logger.error(`Serial Error on port ${portPath}:`, err.message);
   });
 }
 
@@ -130,12 +149,12 @@ function connectSerial(portPath, baudRate) {
 export function sendSerialCommand(machineId, command) {
   const isEdgeGateway = process.env.IS_EDGE_GATEWAY === 'true';
   if (!isEdgeGateway) {
-    console.log(`☁️ Cloud Mode: Simulating serial command "${command}" for machine ${machineId}`);
+    logger.debug(`☁️ Cloud Mode: Simulating serial command "${command}" for machine ${machineId}`);
     return Promise.resolve({ type: 'ack', command, status: 'success' });
   }
 
-  if (machineId !== '1313') {
-    return Promise.reject(new Error('Invalid machine ID for serial interlock'));
+  if (machineId !== getGatewayMachineId()) {
+    return Promise.reject(new Error(`Machine ${machineId} is not the machine wired to this gateway (GATEWAY_MACHINE_ID=${getGatewayMachineId()})`));
   }
 
   if (!portInstance || !portInstance.isOpen) {
@@ -166,7 +185,7 @@ export function sendSerialCommand(machineId, command) {
         pendingAcks.delete(command);
         reject(new Error(`Failed to write to serial port: ${err.message}`));
       } else {
-        console.log(`🔌 Serial: Sent control command ->`, payload);
+        logger.info(`🔌 Serial: Sent control command ->`, payload);
       }
     });
   });

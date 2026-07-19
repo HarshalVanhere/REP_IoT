@@ -2,6 +2,7 @@ import Aedes from 'aedes';
 import net from 'net';
 import db from '../config/db.js';
 import { calculateOEE } from './oeeCalculator.js';
+import { logger } from '../utils/logger.js';
 
 let aedesInstance = null;
 let server = null;
@@ -15,16 +16,34 @@ export function startMQTTBroker(broadcastCallback) {
   wsBroadcastCallback = broadcastCallback;
   
   aedesInstance = new Aedes();
-  
+
+  // Require credentials for any client connecting to the broker, unless explicitly
+  // left unconfigured for local development (logs a loud warning either way).
+  const mqttUsername = process.env.MQTT_USERNAME;
+  const mqttPassword = process.env.MQTT_PASSWORD;
+
+  if (mqttUsername && mqttPassword) {
+    aedesInstance.authenticate = (client, username, password, callback) => {
+      const providedPassword = password ? password.toString() : '';
+      const authorized = username === mqttUsername && providedPassword === mqttPassword;
+      if (!authorized) {
+        logger.warn(`MQTT: Rejected unauthenticated client "${client.id}" (username: ${username || 'none'})`);
+      }
+      callback(null, authorized);
+    };
+  } else {
+    logger.warn('MQTT_USERNAME/MQTT_PASSWORD are not set - the embedded MQTT broker is accepting UNAUTHENTICATED publishes. Set them before deploying to a real network.');
+  }
+
   const port = parseInt(process.env.MQTT_PORT || '1883');
   server = net.createServer(aedesInstance.handle);
   
   server.listen(port, () => {
-    console.log(`🚀 Embedded MQTT Broker listening on port ${port}`);
+    logger.info(`🚀 Embedded MQTT Broker listening on port ${port}`);
   });
 
   server.on('error', (err) => {
-    console.error('❌ MQTT Broker server error:', err.message);
+    logger.error('❌ MQTT Broker server error:', err.message);
   });
 
   // Handle incoming publications
@@ -55,7 +74,7 @@ export function startMQTTBroker(broadcastCallback) {
           await handleStatusMessage(machineId, payload.status || payload.value);
         }
       } catch (err) {
-        console.error(`Error processing MQTT topic ${topic}:`, err.message);
+        logger.error(`Error processing MQTT topic ${topic}:`, err.message);
       }
     }
   });
@@ -73,7 +92,7 @@ export function publishMQTT(topic, payload) {
     retain: false
   };
   aedesInstance.publish(message, (err) => {
-    if (err) console.error('Error publishing MQTT internally:', err);
+    if (err) logger.error('Error publishing MQTT internally:', err);
   });
 }
 
@@ -88,7 +107,7 @@ export async function handlePulseMessage(machineId, payload) {
   // 1. Double check if machine exists, if not create/verify it
   const [machines] = await db.query('SELECT * FROM machines WHERE id = ?', [machineId]);
   if (machines.length === 0) {
-    console.warn(`Machine ${machineId} does not exist in db. Skipping pulse.`);
+    logger.warn(`Machine ${machineId} does not exist in db. Skipping pulse.`);
     return;
   }
 
@@ -132,7 +151,7 @@ export async function handlePulseMessage(machineId, payload) {
  */
 export async function handleStatusMessage(machineId, status) {
   if (!['Running', 'Stopped', 'No Signal'].includes(status)) {
-    console.warn(`Invalid status status received for ${machineId}: ${status}`);
+    logger.warn(`Invalid status status received for ${machineId}: ${status}`);
     return;
   }
 
@@ -149,7 +168,7 @@ export async function handleStatusMessage(machineId, status) {
     
     // 3. Transition status logs
     await ensureActiveStatusLog(machineId, status, timestamp);
-    console.log(`🔌 Machine ${machineId} transitioned: ${currentStatus} ➡️ ${status}`);
+    logger.info(`🔌 Machine ${machineId} transitioned: ${currentStatus} ➡️ ${status}`);
   }
 
   // 4. Recalculate OEE
@@ -201,7 +220,7 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
     [machineId, timestamp, operatorId]
   );
 
-  console.log(`🔌 Machine ${machineId} resumed by ${operatorId || 'system'}: ${currentStatus} ➡️ Running (Reason: ${reason})`);
+  logger.info(`🔌 Machine ${machineId} resumed by ${operatorId || 'system'}: ${currentStatus} ➡️ Running (Reason: ${reason})`);
 
   // 5. Recalculate OEE
   const oeeMetrics = await calculateOEE(machineId);

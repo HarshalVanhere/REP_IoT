@@ -1,32 +1,34 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowRight, Factory, Lock, LogIn, MoonStar, SunMedium, ShieldAlert } from 'lucide-react';
+import React, { useState } from 'react';
+import { ArrowRight, Factory, Lock, LogIn, MoonStar, SunMedium, ShieldAlert, User } from 'lucide-react';
+import { apiFetch } from '../lib/api';
 
-export default function LoginScreen({ accounts, themeMode, onToggleTheme, onLogin }) {
-  const [loginId, setLoginId] = useState(accounts[0]?.loginId || '');
-  const [password, setPassword] = useState('1234');
+export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }) {
+  const [loginId, setLoginId] = useState('');
+  const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const selectedAccount = useMemo(
-    () => accounts.find((account) => account.loginId === loginId),
-    [accounts, loginId]
-  );
-
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
-
-    if (!selectedAccount || password !== '1234') {
-      setErrorMessage('Invalid credentials. Use a valid login ID with password 1234.');
+    if (!loginId || !password) {
+      setErrorMessage('Enter both your Login ID and password.');
       return;
     }
 
+    setIsSubmitting(true);
     setErrorMessage('');
-    onLogin({
-      loginId: selectedAccount.loginId,
-      role: selectedAccount.role,
-      displayName: selectedAccount.displayName,
-      operatorId: selectedAccount.operatorId || '',
-      terminalId: selectedAccount.terminalId || selectedAccount.loginId
-    });
+
+    try {
+      const data = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: { loginId: loginId.trim(), password }
+      });
+      onLoginSuccess(data.user, data.token);
+    } catch (err) {
+      setErrorMessage(err.message || 'Login failed. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -48,7 +50,7 @@ export default function LoginScreen({ accounts, themeMode, onToggleTheme, onLogi
       </div>
 
       <div className="w-full max-w-[900px] grid lg:grid-cols-[1.1fr_0.9fr] jbm-card overflow-hidden shadow-xl animate-in fade-in duration-300">
-        
+
         {/* Left Side: Brand Promo / Info Panel */}
         <div className="bg-[var(--secondary2-trans-100)] p-8 flex flex-col justify-between border-r-[1.5px] border-[var(--grey-200)]">
           <div className="space-y-6">
@@ -59,7 +61,7 @@ export default function LoginScreen({ accounts, themeMode, onToggleTheme, onLogi
               </div>
               <div>
                 <span className="text-[10px] font-black uppercase tracking-[0.45em] text-[var(--primary)] block leading-none">Smart Factory</span>
-                <span className="text-lg font-black tracking-wider text-[var(--grey-900)] uppercase font-mono">Factory-Sync MM</span>
+                <span className="text-lg font-black tracking-wider text-[var(--grey-900)] uppercase font-mono">JBM Factory-Sync MM</span>
               </div>
             </div>
 
@@ -80,8 +82,8 @@ export default function LoginScreen({ accounts, themeMode, onToggleTheme, onLogi
               <p className="mt-1 text-xs font-bold text-[var(--grey-900)]">Role-based Access</p>
             </div>
             <div className="p-3 bg-[var(--white-color)] border border-[var(--grey-200)] rounded-xl">
-              <p className="text-[9px] font-extrabold uppercase tracking-wider text-slate-400">Default Pass</p>
-              <p className="mt-1 text-xs font-bold text-[var(--grey-900)]">Use: 1234</p>
+              <p className="text-[9px] font-extrabold uppercase tracking-wider text-slate-400">First Login</p>
+              <p className="mt-1 text-xs font-bold text-[var(--grey-900)]">Ask your Admin for credentials</p>
             </div>
           </div>
         </div>
@@ -102,29 +104,29 @@ export default function LoginScreen({ accounts, themeMode, onToggleTheme, onLogi
             <form onSubmit={handleSubmit} className="mt-6 space-y-4">
               <div>
                 <label className="mb-1.5 block text-[9.5px] font-extrabold uppercase tracking-widest text-slate-450">Login ID</label>
-                <select
-                  value={loginId}
-                  onChange={(e) => setLoginId(e.target.value)}
-                  className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] hover:border-[var(--primary)] focus:border-[var(--primary)] focus:bg-[var(--white-color)] text-[var(--grey-900)] rounded-xl py-2.5 px-3 text-xs font-bold uppercase transition-all outline-none"
-                >
-                  <option value="">Select profile Badge...</option>
-                  {accounts.map(acc => (
-                    <option key={acc.loginId} value={acc.loginId}>
-                      {acc.loginId} - {acc.role} ({acc.displayName})
-                    </option>
-                  ))}
-                </select>
+                <div className="relative">
+                  <User className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-455" />
+                  <input
+                    type="text"
+                    value={loginId}
+                    onChange={(e) => setLoginId(e.target.value.toUpperCase())}
+                    placeholder="e.g. ADMIN, SUP-201"
+                    autoComplete="username"
+                    className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] hover:border-[var(--primary)] focus:border-[var(--primary)] focus:bg-[var(--white-color)] text-[var(--grey-900)] rounded-xl py-2.5 pl-9 pr-3 text-xs font-bold uppercase transition-all outline-none"
+                  />
+                </div>
               </div>
 
               <div>
-                <label className="mb-1.5 block text-[9.5px] font-extrabold uppercase tracking-widest text-slate-450">PIN / Password</label>
+                <label className="mb-1.5 block text-[9.5px] font-extrabold uppercase tracking-widest text-slate-450">Password</label>
                 <div className="relative">
                   <Lock className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-455" />
                   <input
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter PIN code"
+                    placeholder="Enter your password"
+                    autoComplete="current-password"
                     className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] hover:border-[var(--primary)] focus:border-[var(--primary)] focus:bg-[var(--white-color)] text-[var(--grey-900)] rounded-xl py-2.5 pl-9 pr-3 text-xs font-bold transition-all outline-none"
                   />
                 </div>
@@ -139,11 +141,11 @@ export default function LoginScreen({ accounts, themeMode, onToggleTheme, onLogi
 
               <button
                 type="submit"
-                disabled={!loginId}
+                disabled={!loginId || !password || isSubmitting}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--primary)] hover:bg-[var(--primary)]/90 disabled:opacity-50 text-white font-extrabold text-xs uppercase tracking-widest py-3 border border-[var(--primary)]/10 shadow-md transition-all active:scale-95 mt-2"
               >
-                Access Command Center
-                <ArrowRight className="w-4 h-4" />
+                {isSubmitting ? 'Signing In...' : 'Access Command Center'}
+                {!isSubmitting && <ArrowRight className="w-4 h-4" />}
               </button>
             </form>
           </div>

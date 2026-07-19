@@ -1,10 +1,16 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import bcrypt from 'bcryptjs';
+import { logger } from '../utils/logger.js';
 
 dotenv.config();
 
 let pool = null;
 let isMock = false;
+
+// Default seed password for demo/first-boot accounts. Must be changed via
+// POST /api/auth/change-password before real deployment.
+const DEFAULT_SEED_PASSWORD_HASH = bcrypt.hashSync('1234', 10);
 
 // Mock database storage in case MySQL is unavailable (IDs updated to match names)
 const mockDb = {
@@ -20,21 +26,25 @@ const mockDb = {
   ],
   pulses: [],
   status_logs: [],
-  users: []
+  users: [],
+  audit_log: [],
+  shift_plans: []
 };
 
 let mockPulseId = 1;
 let mockLogId = 1;
+let mockAuditId = 1;
+let mockShiftPlanId = 1;
 
 // Seed rich mock data
 function seedMockData() {
   const now = new Date();
   
-  // 1. Initialize users
+  // 1. Initialize users (default password for all seed accounts is "1234" - change on first login)
   mockDb.users = [
-    { loginId: 'SUP-201', role: 'Supervisor', displayName: 'Supervisor User', terminalId: 'DASHBOARD' },
-    { loginId: 'PPC-301', role: 'PPC Engineer', displayName: 'PPC Engineer', terminalId: 'PLANNING-BOARD' },
-    { loginId: 'ADMIN', role: 'Admin', displayName: 'Admin User', terminalId: 'CONTROL-ROOM' }
+    { loginId: 'SUP-201', role: 'Supervisor', displayName: 'Supervisor User', terminalId: 'DASHBOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
+    { loginId: 'PPC-301', role: 'PPC Engineer', displayName: 'PPC Engineer', terminalId: 'PLANNING-BOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
+    { loginId: 'ADMIN', role: 'Admin', displayName: 'Admin User', terminalId: 'CONTROL-ROOM', password_hash: DEFAULT_SEED_PASSWORD_HASH }
   ];
 
   // 2. Generate completed downtime logs (Stopped status) to populate charts
@@ -159,6 +169,10 @@ try {
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME || 'cnc_dashboard',
+    // Return DATE columns (e.g. shift_plans.plan_date) as plain 'YYYY-MM-DD' strings instead
+    // of Date objects - avoids UTC-midnight timezone drift when comparing dates as strings.
+    // Scoped to DATE only so existing TIMESTAMP columns (last_pulse, start_time, etc.) are unaffected.
+    dateStrings: ['DATE'],
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
@@ -185,20 +199,63 @@ try {
         loginId VARCHAR(50) PRIMARY KEY,
         role VARCHAR(50) NOT NULL,
         displayName VARCHAR(100) NOT NULL,
-        terminalId VARCHAR(50) NOT NULL
+        terminalId VARCHAR(50) NOT NULL,
+        password_hash VARCHAR(100) NOT NULL DEFAULT ''
       )
     `);
+    // Upgrade path for pre-existing deployments created before password_hash existed
+    try {
+      await pool.query("ALTER TABLE users ADD COLUMN password_hash VARCHAR(100) NOT NULL DEFAULT ''");
+      console.log('   + Added "password_hash" column to users table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
     
     const [rows] = await pool.query('SELECT COUNT(*) as count FROM users');
     if (rows[0].count === 0) {
       await pool.query(`
-        INSERT INTO users (loginId, role, displayName, terminalId) VALUES
-        ('SUP-201', 'Supervisor', 'Supervisor User', 'DASHBOARD'),
-        ('PPC-301', 'PPC Engineer', 'PPC Engineer', 'PLANNING-BOARD'),
-        ('ADMIN', 'Admin', 'Admin User', 'CONTROL-ROOM')
-      `);
-      console.log('✅ Seeded users table in MySQL.');
+        INSERT INTO users (loginId, role, displayName, terminalId, password_hash) VALUES
+        ('SUP-201', 'Supervisor', 'Supervisor User', 'DASHBOARD', ?),
+        ('PPC-301', 'PPC Engineer', 'PPC Engineer', 'PLANNING-BOARD', ?),
+        ('ADMIN', 'Admin', 'Admin User', 'CONTROL-ROOM', ?)
+      `, [DEFAULT_SEED_PASSWORD_HASH, DEFAULT_SEED_PASSWORD_HASH, DEFAULT_SEED_PASSWORD_HASH]);
+      console.log('✅ Seeded users table in MySQL (default password: 1234 - change before go-live).');
+    } else {
+      // Backfill any existing rows that predate password_hash (upgrade path)
+      await pool.query("UPDATE users SET password_hash = ? WHERE password_hash = '' OR password_hash IS NULL", [DEFAULT_SEED_PASSWORD_HASH]);
     }
+
+    // Create audit_log table for tracking sensitive actions (login, user/machine CRUD, stop/resume, planning changes)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        actor_login_id VARCHAR(50) NOT NULL,
+        action VARCHAR(100) NOT NULL,
+        target VARCHAR(100) NULL,
+        details VARCHAR(500) NULL
+      )
+    `);
+
+    // Create shift_plans table for dated PPC shift scheduling
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS shift_plans (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        machine_id VARCHAR(50) NOT NULL,
+        plan_date DATE NOT NULL,
+        shift VARCHAR(10) NOT NULL,
+        target INT NOT NULL,
+        ideal_cycle_time INT NOT NULL,
+        part_name VARCHAR(100) NULL,
+        operator VARCHAR(100) NULL,
+        created_by VARCHAR(50) NULL,
+        updated_by VARCHAR(50) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_machine_date_shift (machine_id, plan_date, shift),
+        FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+      )
+    `);
   }
 } catch (error) {
   if (process.env.NODE_ENV === 'production') {
@@ -370,7 +427,17 @@ async function mockQuery(sql, params = []) {
   // 7. UPDATE machines
   if (sqlLower.startsWith('update machines')) {
     let affectedRows = 0;
-    if (sqlLower.includes('set target')) {
+    if (sqlLower.includes('set name')) {
+      const [name, department, target, idealCycleTime, machineId] = params;
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.name = name;
+        machine.department = department;
+        machine.target = parseInt(target);
+        machine.ideal_cycle_time = parseInt(idealCycleTime);
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set target')) {
       const target = params[0];
       const ideal = params[1];
       const part = params[2];
@@ -435,26 +502,37 @@ async function mockQuery(sql, params = []) {
       loginId: params[0],
       role: params[1],
       displayName: params[2],
-      terminalId: params[3]
+      terminalId: params[3],
+      password_hash: params[4] || DEFAULT_SEED_PASSWORD_HASH
     };
     mockDb.users = mockDb.users.filter(u => u.loginId !== user.loginId);
     mockDb.users.push(user);
     return [{ affectedRows: 1 }, []];
   }
 
-  // 10. UPDATE users
+  // 10. UPDATE users (password change vs profile update)
   if (sqlLower.startsWith('update users')) {
-    const role = params[0];
-    const displayName = params[1];
-    const terminalId = params[2];
-    const loginId = params[3];
-    mockDb.users.forEach(u => {
-      if (u.loginId === loginId) {
-        u.role = role;
-        u.displayName = displayName;
-        u.terminalId = terminalId;
-      }
-    });
+    if (sqlLower.includes('set password_hash')) {
+      const passwordHash = params[0];
+      const loginId = params[1];
+      mockDb.users.forEach(u => {
+        if (u.loginId === loginId) {
+          u.password_hash = passwordHash;
+        }
+      });
+    } else {
+      const role = params[0];
+      const displayName = params[1];
+      const terminalId = params[2];
+      const loginId = params[3];
+      mockDb.users.forEach(u => {
+        if (u.loginId === loginId) {
+          u.role = role;
+          u.displayName = displayName;
+          u.terminalId = terminalId;
+        }
+      });
+    }
     return [{ affectedRows: 1 }, []];
   }
 
@@ -463,6 +541,108 @@ async function mockQuery(sql, params = []) {
     const loginId = params[0];
     mockDb.users = mockDb.users.filter(u => u.loginId !== loginId);
     return [{ affectedRows: 1 }, []];
+  }
+
+  // 12. SELECT FROM audit_log
+  if (normalizedSql.includes('from audit_log')) {
+    const sorted = [...mockDb.audit_log].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return [JSON.parse(JSON.stringify(sorted.slice(0, 200))), []];
+  }
+
+  // 13. INSERT INTO audit_log
+  if (sqlLower.startsWith('insert into audit_log')) {
+    mockDb.audit_log.push({
+      id: mockAuditId++,
+      timestamp: new Date(),
+      actor_login_id: params[0],
+      action: params[1],
+      target: params[2] || null,
+      details: params[3] || null
+    });
+    return [{ affectedRows: 1 }, []];
+  }
+
+  // 14. INSERT INTO machines
+  if (sqlLower.startsWith('insert into machines')) {
+    const machine = {
+      id: params[0],
+      name: params[1],
+      department: params[2],
+      status: 'No Signal',
+      target: parseInt(params[3]) || 0,
+      production_count: 0,
+      good_count: 0,
+      scrap_count: 0,
+      ideal_cycle_time: parseInt(params[4]) || 15,
+      last_pulse: null,
+      active_part_name: params[5] || 'Unassigned',
+      assigned_operator: params[6] || 'Unassigned'
+    };
+    mockDb.machines = mockDb.machines.filter(m => m.id !== machine.id);
+    mockDb.machines.push(machine);
+    return [{ affectedRows: 1 }, []];
+  }
+
+  // 15. DELETE FROM machines
+  if (sqlLower.startsWith('delete from machines')) {
+    const machineId = params[0];
+    mockDb.machines = mockDb.machines.filter(m => m.id !== machineId);
+    mockDb.pulses = mockDb.pulses.filter(p => p.machine_id !== machineId);
+    mockDb.status_logs = mockDb.status_logs.filter(l => l.machine_id !== machineId);
+    return [{ affectedRows: 1 }, []];
+  }
+
+  // 16. SELECT FROM shift_plans
+  if (normalizedSql.includes('from shift_plans')) {
+    let filtered = [...mockDb.shift_plans];
+    if (normalizedSql.includes('machine_id = ?') && normalizedSql.includes('shift = ?')) {
+      const [mId, planDate, shift] = params;
+      filtered = filtered.filter(p => p.machine_id === mId && p.plan_date === planDate && p.shift === shift);
+    } else if (normalizedSql.includes('where id = ?')) {
+      const id = params[0];
+      filtered = filtered.filter(p => p.id === id);
+    } else if (normalizedSql.includes('plan_date = ?')) {
+      const planDate = params[0];
+      filtered = filtered.filter(p => p.plan_date === planDate);
+    }
+    return [JSON.parse(JSON.stringify(filtered)), []];
+  }
+
+  // 17. INSERT INTO shift_plans
+  if (sqlLower.startsWith('insert into shift_plans')) {
+    const [machineId, planDate, shift, target, idealCycleTime, partName, operator, createdBy, updatedBy] = params;
+    const now = new Date();
+    const plan = {
+      id: mockShiftPlanId++,
+      machine_id: machineId,
+      plan_date: planDate,
+      shift,
+      target: parseInt(target),
+      ideal_cycle_time: parseInt(idealCycleTime),
+      part_name: partName || null,
+      operator: operator || null,
+      created_by: createdBy || null,
+      updated_by: updatedBy || createdBy || null,
+      created_at: now,
+      updated_at: now
+    };
+    mockDb.shift_plans.push(plan);
+    return [{ insertId: plan.id, affectedRows: 1 }, []];
+  }
+
+  // 18. UPDATE shift_plans
+  if (sqlLower.startsWith('update shift_plans')) {
+    const [target, idealCycleTime, partName, operator, updatedBy, id] = params;
+    const plan = mockDb.shift_plans.find(p => p.id === id);
+    if (plan) {
+      plan.target = parseInt(target);
+      plan.ideal_cycle_time = parseInt(idealCycleTime);
+      plan.part_name = partName || null;
+      plan.operator = operator || null;
+      plan.updated_by = updatedBy || null;
+      plan.updated_at = new Date();
+    }
+    return [{ affectedRows: plan ? 1 : 0 }, []];
   }
 
   return [{ affectedRows: 0 }, []];

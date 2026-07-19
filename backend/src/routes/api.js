@@ -1,18 +1,23 @@
 import express from 'express';
+import bcrypt from 'bcryptjs';
 import db from '../config/db.js';
 import { calculateOEE } from '../services/oeeCalculator.js';
 import { handleStatusMessage, handleResumeMessage, publishMQTT } from '../services/mqttService.js';
 import { sendSerialCommand } from '../services/serialService.js';
+import { requireAuth, requireRole, requireSyncKey } from '../middleware/auth.js';
+import { recordAuditLog } from '../utils/auditLog.js';
+import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
+import { logger } from '../utils/logger.js';
 
 const router = express.Router();
 
 /**
  * Fetch all machines with real-time OEE metrics
  */
-router.get('/machines', async (req, res) => {
+router.get('/machines', requireAuth, async (req, res) => {
   try {
     const [machines] = await db.query('SELECT * FROM machines');
-    
+
     const enrichedMachines = await Promise.all(
       machines.map(async (machine) => {
         const metrics = await calculateOEE(machine.id);
@@ -22,10 +27,10 @@ router.get('/machines', async (req, res) => {
         };
       })
     );
-    
+
     res.json(enrichedMachines);
   } catch (err) {
-    console.error('API Error: GET /machines:', err.message);
+    logger.error('API Error: GET /machines:', err.message);
     res.status(500).json({ error: 'Failed to retrieve machines list' });
   }
 });
@@ -33,7 +38,7 @@ router.get('/machines', async (req, res) => {
 /**
  * Fetch pulse history for a specific machine (last 30 pulses)
  */
-router.get('/machines/:id/history', async (req, res) => {
+router.get('/machines/:id/history', requireAuth, async (req, res) => {
   const machineId = req.params.id;
   try {
     const [pulses] = await db.query(
@@ -43,28 +48,27 @@ router.get('/machines/:id/history', async (req, res) => {
     // Return chronologically (oldest to newest)
     res.json(pulses.reverse());
   } catch (err) {
-    console.error(`API Error: GET /machines/${machineId}/history:`, err.message);
+    logger.error(`API Error: GET /machines/${machineId}/history:`, err.message);
     res.status(500).json({ error: 'Failed to retrieve pulse history' });
   }
 });
 
-
-
 /**
  * Stop machine (Operator touchscreen interface action)
  */
-router.post('/machines/:id/stop', async (req, res) => {
+router.post('/machines/:id/stop', requireAuth, requireRole('Operator', 'Supervisor', 'Admin'), async (req, res) => {
   const machineId = req.params.id;
   try {
     // 1. Trigger physical machine lockout and wait for ESP32 confirmation
     await sendSerialCommand(machineId, 'stop');
-    
+
     // 2. Only transition database/status after serial confirmation
     await handleStatusMessage(machineId, 'Stopped');
-    
+    await recordAuditLog(req.user.loginId, 'MACHINE_STOP', machineId);
+
     res.json({ success: true, message: `CNC Machine ${machineId} status set to Stopped (Confirmed by hardware)` });
   } catch (err) {
-    console.error(`API Error: POST /machines/${machineId}/stop:`, err.message);
+    logger.error(`API Error: POST /machines/${machineId}/stop:`, err.message);
     res.status(500).json({ error: `Failed to stop CNC machine: ${err.message}` });
   }
 });
@@ -72,7 +76,7 @@ router.post('/machines/:id/stop', async (req, res) => {
 /**
  * Resume machine with downtime reason (Operator touchscreen interface action)
  */
-router.post('/machines/:id/resume', async (req, res) => {
+router.post('/machines/:id/resume', requireAuth, requireRole('Operator', 'Supervisor', 'Admin'), async (req, res) => {
   const machineId = req.params.id;
   const { reason, operatorId } = req.body;
 
@@ -83,13 +87,14 @@ router.post('/machines/:id/resume', async (req, res) => {
   try {
     // 1. Trigger physical machine run enablement and wait for ESP32 confirmation
     await sendSerialCommand(machineId, 'resume');
-    
+
     // 2. Only transition database/status after serial confirmation
     await handleResumeMessage(machineId, reason, operatorId);
-    
+    await recordAuditLog(req.user.loginId, 'MACHINE_RESUME', machineId, reason);
+
     res.json({ success: true, message: `CNC Machine ${machineId} resumed in Running state (Confirmed by hardware)` });
   } catch (err) {
-    console.error(`API Error: POST /machines/${machineId}/resume:`, err.message);
+    logger.error(`API Error: POST /machines/${machineId}/resume:`, err.message);
     res.status(500).json({ error: `Failed to resume CNC machine: ${err.message}` });
   }
 });
@@ -97,103 +102,132 @@ router.post('/machines/:id/resume', async (req, res) => {
 /**
  * Fetch logs history for plant management reports
  */
-router.get('/reports', async (req, res) => {
+router.get('/reports', requireAuth, async (req, res) => {
   try {
     const [reports] = await db.query(`
-      SELECT sl.id, sl.machine_id, m.name as machine_name, m.department as machine_section, sl.status, sl.start_time, sl.end_time, sl.downtime_reason, sl.operator_id, sl.part_name 
-      FROM status_logs sl 
-      JOIN machines m ON sl.machine_id = m.id 
-      ORDER BY sl.start_time DESC 
+      SELECT sl.id, sl.machine_id, m.name as machine_name, m.department as machine_section, sl.status, sl.start_time, sl.end_time, sl.downtime_reason, sl.operator_id, sl.part_name
+      FROM status_logs sl
+      JOIN machines m ON sl.machine_id = m.id
+      ORDER BY sl.start_time DESC
       LIMIT 100
     `);
     res.json(reports);
   } catch (err) {
-    console.error('API/Reports Error:', err.message);
+    logger.error('API/Reports Error:', err.message);
     res.status(500).json({ error: 'Failed to retrieve reports log' });
   }
 });
 
 /**
- * PPC Production Planning update (set Target, Ideal Cycle Time, Part Name, and Operator)
+ * Machine Management CRUD (Admin only) - lets the plant add/edit/remove physical machines
+ * without editing source code or re-running the seed script.
  */
-router.post('/machines/:id/planning', async (req, res) => {
-  const machineId = req.params.id;
-  const { target, ideal_cycle_time, active_part_name, assigned_operator } = req.body;
+router.post('/machines', requireAuth, requireRole('Admin'), async (req, res) => {
+  const { id, name, department, target, ideal_cycle_time, active_part_name, assigned_operator } = req.body;
 
-  if (target === undefined || ideal_cycle_time === undefined) {
-    return res.status(400).json({ error: 'target and ideal_cycle_time are required' });
+  if (!id || !name || !department) {
+    return res.status(400).json({ error: 'id, name, and department are required' });
   }
-
-  const numTarget = parseInt(target);
-  const numCycleTime = parseInt(ideal_cycle_time);
-
-  if (isNaN(numTarget) || isNaN(numCycleTime)) {
-    return res.status(400).json({ error: 'Target and ideal cycle time must be valid numbers' });
-  }
-
-  const partName = active_part_name || 'Unassigned';
-  const operator = assigned_operator || 'Unassigned';
 
   try {
-    // 1. Update target, ideal cycle time, active part, and assigned operator
+    const [existing] = await db.query('SELECT id FROM machines WHERE id = ?', [id]);
+    if (existing.length > 0) {
+      return res.status(409).json({ error: `Machine ${id} already exists` });
+    }
+
     await db.query(
-      'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ? WHERE id = ?',
-      [numTarget, numCycleTime, partName, operator, machineId]
+      'INSERT INTO machines (id, name, department, target, ideal_cycle_time, active_part_name, assigned_operator) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id.trim(), name.trim(), department.trim(), parseInt(target) || 500, parseInt(ideal_cycle_time) || 15, active_part_name || 'Unassigned', assigned_operator || 'Unassigned']
     );
+    await recordAuditLog(req.user.loginId, 'MACHINE_CREATE', id);
 
-    // 2. Fetch current status of machine to trigger status change broadcast
-    const [machines] = await db.query('SELECT status FROM machines WHERE id = ?', [machineId]);
-    const status = machines.length > 0 ? machines[0].status : 'Running';
-
-    // 3. Trigger OEE update broadcast
-    await handleStatusMessage(machineId, status);
-
-    res.json({ success: true, message: `Production plan updated for CNC machine ${machineId}` });
+    res.json({ success: true, message: `Machine ${id} created successfully` });
   } catch (err) {
-    console.error(`PPC Planning Error for ${machineId}:`, err.message);
-    res.status(500).json({ error: 'Failed to update CNC machine plan' });
+    logger.error('API Error: POST /machines:', err.message);
+    res.status(500).json({ error: 'Failed to create machine' });
+  }
+});
+
+router.put('/machines/:id', requireAuth, requireRole('Admin'), async (req, res) => {
+  const machineId = req.params.id;
+  const { name, department, target, ideal_cycle_time } = req.body;
+
+  if (!name || !department || target === undefined || ideal_cycle_time === undefined) {
+    return res.status(400).json({ error: 'name, department, target, and ideal_cycle_time are required' });
+  }
+
+  try {
+    await db.query(
+      'UPDATE machines SET name = ?, department = ?, target = ?, ideal_cycle_time = ? WHERE id = ?',
+      [name.trim(), department.trim(), parseInt(target), parseInt(ideal_cycle_time), machineId]
+    );
+    await recordAuditLog(req.user.loginId, 'MACHINE_UPDATE', machineId);
+
+    res.json({ success: true, message: `Machine ${machineId} updated successfully` });
+  } catch (err) {
+    logger.error(`API Error: PUT /machines/${machineId}:`, err.message);
+    res.status(500).json({ error: 'Failed to update machine' });
+  }
+});
+
+router.delete('/machines/:id', requireAuth, requireRole('Admin'), async (req, res) => {
+  const machineId = req.params.id;
+  try {
+    await db.query('DELETE FROM machines WHERE id = ?', [machineId]);
+    await recordAuditLog(req.user.loginId, 'MACHINE_DELETE', machineId);
+
+    res.json({ success: true, message: `Machine ${machineId} deleted successfully` });
+  } catch (err) {
+    logger.error(`API Error: DELETE /machines/${machineId}:`, err.message);
+    res.status(500).json({ error: 'Failed to delete machine' });
   }
 });
 
 /**
- * Fetch all user profiles for CRUD management
+ * Fetch all user profiles for CRUD management (Admin only)
  */
-router.get('/users', async (req, res) => {
+router.get('/users', requireAuth, requireRole('Admin'), async (req, res) => {
   try {
     const [users] = await db.query('SELECT * FROM users');
-    res.json(users);
+    // Never expose password hashes to the client
+    res.json(users.map(({ password_hash, ...safe }) => safe));
   } catch (err) {
-    console.error('API Error: GET /users:', err.message);
+    logger.error('API Error: GET /users:', err.message);
     res.status(500).json({ error: 'Failed to retrieve user profiles list' });
   }
 });
 
 /**
- * Create a new user profile
+ * Create a new user profile (Admin only)
  */
-router.post('/users', async (req, res) => {
-  const { loginId, role, displayName, terminalId } = req.body;
-  if (!loginId || !role || !displayName || !terminalId) {
-    return res.status(400).json({ error: 'loginId, role, displayName, and terminalId are required' });
+router.post('/users', requireAuth, requireRole('Admin'), async (req, res) => {
+  const { loginId, role, displayName, terminalId, password } = req.body;
+  if (!loginId || !role || !displayName || !terminalId || !password) {
+    return res.status(400).json({ error: 'loginId, role, displayName, terminalId, and password are required' });
+  }
+  if (password.length < 4) {
+    return res.status(400).json({ error: 'Password must be at least 4 characters' });
   }
   try {
+    const passwordHash = await bcrypt.hash(password, 10);
     await db.query(
-      'INSERT INTO users (loginId, role, displayName, terminalId) VALUES (?, ?, ?, ?)',
-      [loginId.trim().toUpperCase(), role.trim(), displayName.trim(), terminalId.trim()]
+      'INSERT INTO users (loginId, role, displayName, terminalId, password_hash) VALUES (?, ?, ?, ?, ?)',
+      [loginId.trim().toUpperCase(), role.trim(), displayName.trim(), terminalId.trim(), passwordHash]
     );
+    await recordAuditLog(req.user.loginId, 'USER_CREATE', loginId.trim().toUpperCase());
     res.json({ success: true, message: `User profile ${loginId} created successfully` });
   } catch (err) {
-    console.error('API Error: POST /users:', err.message);
-    res.status(550).json({ error: 'Failed to create user profile' });
+    logger.error('API Error: POST /users:', err.message);
+    res.status(500).json({ error: 'Failed to create user profile' });
   }
 });
 
 /**
- * Update an existing user profile
+ * Update an existing user profile (Admin only). Password is optional - only changed if provided.
  */
-router.put('/users/:loginId', async (req, res) => {
+router.put('/users/:loginId', requireAuth, requireRole('Admin'), async (req, res) => {
   const loginId = req.params.loginId;
-  const { role, displayName, terminalId } = req.body;
+  const { role, displayName, terminalId, password } = req.body;
   if (!role || !displayName || !terminalId) {
     return res.status(400).json({ error: 'role, displayName, and terminalId are required' });
   }
@@ -202,24 +236,56 @@ router.put('/users/:loginId', async (req, res) => {
       'UPDATE users SET role = ?, displayName = ?, terminalId = ? WHERE loginId = ?',
       [role.trim(), displayName.trim(), terminalId.trim(), loginId]
     );
+    if (password) {
+      if (password.length < 4) {
+        return res.status(400).json({ error: 'Password must be at least 4 characters' });
+      }
+      const passwordHash = await bcrypt.hash(password, 10);
+      await db.query('UPDATE users SET password_hash = ? WHERE loginId = ?', [passwordHash, loginId]);
+    }
+    await recordAuditLog(req.user.loginId, 'USER_UPDATE', loginId);
     res.json({ success: true, message: `User profile ${loginId} updated successfully` });
   } catch (err) {
-    console.error('API Error: PUT /users:', err.message);
+    logger.error('API Error: PUT /users:', err.message);
     res.status(500).json({ error: 'Failed to update user profile' });
   }
 });
 
 /**
- * Delete a user profile
+ * Delete a user profile (Admin only)
  */
-router.delete('/users/:loginId', async (req, res) => {
+router.delete('/users/:loginId', requireAuth, requireRole('Admin'), async (req, res) => {
   const loginId = req.params.loginId;
+  if (loginId === 'ADMIN') {
+    return res.status(400).json({ error: 'The default ADMIN account cannot be deleted' });
+  }
   try {
     await db.query('DELETE FROM users WHERE loginId = ?', [loginId]);
+    await recordAuditLog(req.user.loginId, 'USER_DELETE', loginId);
     res.json({ success: true, message: `User profile ${loginId} deleted successfully` });
   } catch (err) {
-    console.error('API Error: DELETE /users:', err.message);
+    logger.error('API Error: DELETE /users:', err.message);
     res.status(500).json({ error: 'Failed to delete user profile' });
+  }
+});
+
+/**
+ * Downtime reason codes - single source of truth, shared by OEE aggregation and the frontend.
+ */
+router.get('/reason-codes', requireAuth, (req, res) => {
+  res.json(PREDEFINED_REASONS);
+});
+
+/**
+ * Audit log (Admin only) - who did what, for traceability on a factory-floor system.
+ */
+router.get('/audit-log', requireAuth, requireRole('Admin'), async (req, res) => {
+  try {
+    const [entries] = await db.query('SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT 200');
+    res.json(entries);
+  } catch (err) {
+    logger.error('API Error: GET /audit-log:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve audit log' });
   }
 });
 
@@ -229,11 +295,12 @@ router.setBroadcastCallback = (cb) => {
 };
 
 /**
- * Receive batch synchronization data from Edge Gateways
+ * Receive batch synchronization data from Edge Gateways.
+ * Authenticated via a shared SYNC_API_KEY header (machine-to-machine), not a user session.
  */
-router.post('/sync/data', async (req, res) => {
+router.post('/sync/data', requireSyncKey, async (req, res) => {
   const { pulses, statusLogs } = req.body;
-  
+
   if (!pulses || !statusLogs) {
     return res.status(400).json({ error: 'Invalid sync payload' });
   }
@@ -260,9 +327,9 @@ router.post('/sync/data', async (req, res) => {
         // Update machine stats
         const countField = pulse.is_good ? 'good_count' : 'scrap_count';
         await connection.query(
-          `UPDATE machines SET 
-            production_count = production_count + 1, 
-            ${countField} = ${countField} + 1, 
+          `UPDATE machines SET
+            production_count = production_count + 1,
+            ${countField} = ${countField} + 1,
             last_pulse = ?,
             status = 'Running'
            WHERE id = ?`,
@@ -283,12 +350,12 @@ router.post('/sync/data', async (req, res) => {
         await connection.query(
           'INSERT INTO status_logs (machine_id, status, start_time, end_time, downtime_reason, operator_id, part_name, synced) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)',
           [
-            log.machine_id, 
-            log.status, 
-            new Date(log.start_time), 
-            log.end_time ? new Date(log.end_time) : null, 
-            log.downtime_reason, 
-            log.operator_id, 
+            log.machine_id,
+            log.status,
+            new Date(log.start_time),
+            log.end_time ? new Date(log.end_time) : null,
+            log.downtime_reason,
+            log.operator_id,
             log.part_name
           ]
         );
@@ -344,7 +411,7 @@ router.post('/sync/data', async (req, res) => {
     res.json({ success: true, message: `Successfully synced ${pulses.length} pulses and ${statusLogs.length} logs` });
   } catch (err) {
     await connection.rollback();
-    console.error('❌ Batch Sync Error:', err.message);
+    logger.error('Batch Sync Error:', err.message);
     res.status(500).json({ error: 'Failed to synchronize batch payload' });
   } finally {
     connection.release();

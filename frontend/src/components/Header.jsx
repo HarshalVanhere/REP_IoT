@@ -1,8 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { Wifi, WifiOff, Clock, Menu } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Wifi, WifiOff, Menu, Bell } from 'lucide-react';
 
-export default function Header({ socketConnected, sessionUser, onToggleMobileSidebar }) {
+export default function Header({ socketConnected, sessionUser, onToggleMobileSidebar, alerts = [], onDismissAlert, onClearAlerts }) {
   const [time, setTime] = useState(new Date());
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const alertsRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (alertsRef.current && !alertsRef.current.contains(e.target)) {
+        setAlertsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
@@ -93,6 +105,55 @@ export default function Header({ socketConnected, sessionUser, onToggleMobileSid
         <div className="flex flex-col text-right leading-none gap-0.5">
           <span className="text-[10px] font-black text-[var(--primary)] uppercase tracking-wider">{shift.name}</span>
           <span className="text-[11px] font-bold text-slate-400">{shift.hours}</span>
+        </div>
+
+        {/* Alerts bell */}
+        <div className="relative" ref={alertsRef}>
+          <button
+            onClick={() => setAlertsOpen((v) => !v)}
+            className="relative p-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-500 transition active:scale-95"
+            title="Machine alerts"
+          >
+            <Bell className="w-4.5 h-4.5" />
+            {alerts.length > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center">
+                {alerts.length > 9 ? '9+' : alerts.length}
+              </span>
+            )}
+          </button>
+
+          {alertsOpen && (
+            <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto bg-[var(--white-color)] border border-[var(--grey-200)] rounded-xl shadow-xl z-50 animate-in fade-in duration-150">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--grey-200)]">
+                <span className="text-xs font-black uppercase tracking-wider text-[var(--grey-900)]">Machine Alerts</span>
+                {alerts.length > 0 && (
+                  <button onClick={onClearAlerts} className="text-[10px] font-bold uppercase text-[var(--primary)] hover:underline">
+                    Clear all
+                  </button>
+                )}
+              </div>
+              {alerts.length === 0 ? (
+                <div className="px-4 py-8 text-center text-xs font-bold text-slate-400 uppercase tracking-wider">
+                  No alerts. All machines nominal.
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {alerts.map((alert) => (
+                    <li key={alert.id} className="px-4 py-3 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className={`font-black uppercase tracking-wider ${alert.severity === 'critical' ? 'text-rose-600' : 'text-amber-600'}`}>
+                          {alert.severity === 'critical' ? 'Critical' : 'Warning'}
+                        </span>
+                        <button onClick={() => onDismissAlert?.(alert.id)} className="text-slate-350 hover:text-slate-600 text-[10px]">✕</button>
+                      </div>
+                      <p className="text-slate-600 font-semibold mt-1 leading-snug">{alert.message}</p>
+                      <p className="text-[10px] text-slate-400 mt-1 font-mono">{new Date(alert.timestamp).toLocaleTimeString()}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         {/* User Card matching JBM layout */}

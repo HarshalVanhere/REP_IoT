@@ -3,7 +3,7 @@ import { AreaChart, Area, ResponsiveContainer } from 'recharts';
 import { Play, Ban, AlertTriangle, Clock, Target } from 'lucide-react';
 
 export default function MachineCard({ machine, history = [] }) {
-  const { id, name, status, target, production_count, good_count, scrap_count, ideal_cycle_time, last_pulse, metrics, active_part_name, assigned_operator } = machine;
+  const { id, name, status, target, production_count, ideal_cycle_time, last_pulse, metrics, active_part_name, assigned_operator } = machine;
   const { availability = 100, performance = 0, quality = 100, oee = 0, downtimeSeconds = 0 } = metrics || {};
 
   const [cycleTimer, setCycleTimer] = useState(0);

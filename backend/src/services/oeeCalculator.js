@@ -1,27 +1,8 @@
 import db from '../config/db.js';
+import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
+import { getShiftForTimestamp } from '../config/shifts.js';
 
-// Predefined downtime reasons for validation and aggregation
-export const PREDEFINED_REASONS = [
-  'Tea Break',
-  'Lunch Break',
-  'Tool Wear / Replacement',
-  'Measure and Adjustment',
-  'No Power',
-  'Material Shortage',
-  'Mechanical Jam / Fault',
-  'Machine Breakdown',
-  'Startup',
-  'Speed Loss',
-  'Defect / Rework',
-  'Line Organisation',
-  'Setup / Calibration',
-  'No Plan',
-  'NPD Trails',
-  'Preventive Maintenance',
-  'Operator Break',
-  'Unplanned Meeting',
-  'Other'
-];
+export { PREDEFINED_REASONS };
 
 /**
  * Returns planned break intervals for today
@@ -190,18 +171,10 @@ export async function calculateOEE(machineId) {
 
       // Shift-wise production count (A, B, C)
       pulses.forEach(pulse => {
-        const pulseTime = new Date(pulse.timestamp);
-        const hour = pulseTime.getHours();
-        const minute = pulseTime.getMinutes();
-        const minutesSinceMidnight = hour * 60 + minute;
-        
-        if (minutesSinceMidnight >= 7 * 60 && minutesSinceMidnight < 15.5 * 60) {
-          shiftA++;
-        } else if (minutesSinceMidnight >= 15.5 * 60 && minutesSinceMidnight < 24 * 60) {
-          shiftB++;
-        } else {
-          shiftC++;
-        }
+        const shift = getShiftForTimestamp(pulse.timestamp);
+        if (shift === 'Shift A') shiftA++;
+        else if (shift === 'Shift B') shiftB++;
+        else shiftC++;
       });
     } else {
       // 1. Fetch last cycle time (limit 1)
@@ -305,16 +278,7 @@ export async function calculateOEE(machineId) {
     const oee = (availability / 100) * (performance / 100) * (quality / 100) * 100;
 
     // Determine current active shift
-    const nowHour = now.getHours();
-    const nowMinute = now.getMinutes();
-    const nowMinutes = nowHour * 60 + nowMinute;
-    
-    let currentShift = 'Shift C';
-    if (nowMinutes >= 7 * 60 && nowMinutes < 15.5 * 60) {
-      currentShift = 'Shift A';
-    } else if (nowMinutes >= 15.5 * 60 && nowMinutes < 24 * 60) {
-      currentShift = 'Shift B';
-    }
+    const currentShift = getShiftForTimestamp(now);
 
     return {
       availability: parseFloat(availability.toFixed(1)),

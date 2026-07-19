@@ -9,11 +9,12 @@ const SIMULATED_OPERATORS = [
   { id: 'OP-104', name: 'Amit (Operator 104)' }
 ];
 
-export default function OperatorTerminal({ 
-  machines, 
-  onStopMachine, 
-  onResumeMachine, 
-  sessionUser 
+export default function OperatorTerminal({
+  machines,
+  onStopMachine,
+  onResumeMachine,
+  sessionUser,
+  reasonCodes = []
 }) {
   const selectedId = '1313'; // Station-locked for this machine's screen
   const [isReasonOpen, setIsReasonOpen] = useState(false);
@@ -112,7 +113,7 @@ export default function OperatorTerminal({
   const statusStyle = getStatusStyle();
 
   return (
-    <div className="w-screen h-screen bg-slate-950 flex flex-col justify-between p-6 text-slate-100 font-sans select-none m-0 border-none">
+    <div className="w-screen h-screen bg-slate-950 flex flex-col justify-between p-3 sm:p-6 text-slate-100 font-sans select-none m-0 border-none overflow-y-auto">
       
       {!loggedInOperator ? (
         // LOGIN SCREEN MODE
@@ -189,16 +190,16 @@ export default function OperatorTerminal({
         // OPERATOR TERMINAL MODE
         <>
           {/* Header Status Bar */}
-          <div className={`flex justify-between items-center px-6 py-4.5 rounded-3xl border shadow-md ${statusStyle.banner}`}>
-            <div className="flex items-center gap-4">
+          <div className={`flex flex-wrap justify-between items-center gap-3 px-4 sm:px-6 py-3.5 sm:py-4.5 rounded-3xl border shadow-md ${statusStyle.banner}`}>
+            <div className="flex items-center gap-3 sm:gap-4 min-w-0">
               {statusStyle.icon}
-              <span className="font-black tracking-widest uppercase text-base truncate max-w-[600px]">{name}</span>
+              <span className="font-black tracking-widest uppercase text-sm sm:text-base truncate max-w-[50vw] sm:max-w-[600px]">{name}</span>
             </div>
-            <div className="flex items-center gap-5">
-              <span className="flex items-center gap-2 text-xs font-black tracking-widest bg-black/40 px-4 py-1.5 rounded-xl border border-white/5 uppercase">
+            <div className="flex flex-wrap items-center gap-2.5 sm:gap-5">
+              <span className="flex items-center gap-2 text-xs font-black tracking-widest bg-black/40 px-3 sm:px-4 py-1.5 rounded-xl border border-white/5 uppercase">
                 <User className="w-4 h-4 text-sky-400" /> Op: {loggedInOperator || sessionUser?.displayName || 'Operator'}
               </span>
-              
+
               <div className="flex items-center gap-2.5">
                 <span className={`w-3.5 h-3.5 rounded-full ${statusStyle.dot}`}></span>
                 <span className="font-black text-xs uppercase tracking-widest">{status}</span>
@@ -215,8 +216,8 @@ export default function OperatorTerminal({
           </div>
 
           {/* Core Telemetry Stats Area */}
-          <div className="grid grid-cols-12 gap-6 my-6 items-stretch flex-1">
-            
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 my-4 sm:my-6 items-stretch flex-1">
+
             {/* Achievement Radial Progress Dial */}
             <div className="col-span-5 bg-slate-900 border border-slate-800 rounded-3xl p-6 flex flex-col items-center justify-center shadow-lg">
               <div className="relative w-52 h-52 flex items-center justify-center">
@@ -328,6 +329,7 @@ export default function OperatorTerminal({
         onClose={() => setIsReasonOpen(false)}
         onSubmit={handleReasonSubmit}
         machineId={selectedId}
+        reasonCodes={reasonCodes}
       />
 
     </div>

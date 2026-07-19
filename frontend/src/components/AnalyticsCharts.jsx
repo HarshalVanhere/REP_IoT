@@ -14,29 +14,10 @@ const COLORS = [
   '#64748b'  // Slate
 ];
 
-const PREDEFINED_REASONS = [
-  'Tea Break',
-  'Lunch Break',
-  'Tool Wear / Replacement',
-  'Measure and Adjustment',
-  'No Power',
-  'Material Shortage',
-  'Mechanical Jam / Fault',
-  'Machine Breakdown',
-  'Startup',
-  'Speed Loss',
-  'Defect / Rework',
-  'Line Organisation',
-  'Setup / Calibration',
-  'No Plan',
-  'NPD Trails',
-  'Preventive Maintenance',
-  'Operator Break',
-  'Unplanned Meeting',
-  'Other'
-];
-
-export default function AnalyticsCharts({ machines }) {
+export default function AnalyticsCharts({ machines, reasonCodes = [] }) {
+  // Reason codes come from GET /api/reason-codes (backend single source of truth) instead
+  // of being duplicated here - keeps this chart's legend in sync with OEE aggregation.
+  const PREDEFINED_REASONS = reasonCodes;
   // 1. Prepare data for OEE breakdown chart
   const oeeData = machines.map(m => ({
     name: m.id,
@@ -242,7 +223,7 @@ export default function AnalyticsCharts({ machines }) {
                 </div>
                 {/* Legend list grid */}
                 <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 max-h-[220px] overflow-y-auto pr-1">
-                  {pieData.map((entry, index) => {
+                  {pieData.map((entry) => {
                     const colorIndex = PREDEFINED_REASONS.indexOf(entry.name) % COLORS.length;
                     return (
                       <div key={entry.name} className="flex items-start gap-1.5 text-[10px]">
