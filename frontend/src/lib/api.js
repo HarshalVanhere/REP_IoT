@@ -1,9 +1,11 @@
 // Central place for backend/WebSocket URL resolution and authenticated API calls.
 // Consolidates what used to be duplicated fetch() calls scattered across App.jsx.
 
-const DEFAULT_API_URL = import.meta.env.DEV
-  ? 'http://localhost:5000'
-  : (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5000');
+const DEFAULT_API_URL = typeof window !== 'undefined'
+  ? (import.meta.env.DEV
+      ? `${window.location.protocol}//${window.location.hostname}:5000`
+      : window.location.origin)
+  : 'http://localhost:5000';
 
 export const BACKEND_URL = (import.meta.env.VITE_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
 export const WS_URL = (import.meta.env.VITE_WS_URL || BACKEND_URL.replace(/^http/, 'ws')).replace(/\/$/, '');

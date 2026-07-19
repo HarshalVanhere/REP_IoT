@@ -406,8 +406,27 @@ function AppShell() {
     };
     // Intentionally only re-runs when authToken changes - loadInitialData/fetchReports/showToast
     // are stable enough in practice and including them would reconnect the socket every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authToken]);
+
+  // Fallback Polling: if WebSocket connection fails or is blocked, periodically fetch machines telemetry
+  useEffect(() => {
+    if (!authToken || !initialLoadComplete) return undefined;
+
+    const pollInterval = setInterval(() => {
+      if (!socketConnected) {
+        (async () => {
+          try {
+            const machinesList = await apiFetch('/api/machines', { token: authToken });
+            setMachines(machinesList);
+          } catch (err) {
+            console.error('Fallback polling failed:', err.message);
+          }
+        })();
+      }
+    }, 4000); // Poll every 4 seconds when WebSocket is disconnected
+
+    return () => clearInterval(pollInterval);
+  }, [authToken, socketConnected, initialLoadComplete]);
 
 
 
