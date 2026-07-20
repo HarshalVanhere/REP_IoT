@@ -4,6 +4,7 @@ import https from 'https';
 import { URL } from 'url';
 import { logger } from '../utils/logger.js';
 import { handleStatusMessage } from './mqttService.js';
+import { resetProductionCounters } from './productionRecordService.js';
 
 let syncIntervalId = null;
 let isSyncing = false; // Prevent overlapping runs
@@ -129,7 +130,7 @@ async function pullMachineConfig(cloudUrl) {
 
   const remote = await res.json();
   const [localRows] = await db.query(
-    'SELECT status, target, ideal_cycle_time, active_part_name, assigned_operator FROM machines WHERE id = ?',
+    'SELECT status, target, ideal_cycle_time, active_part_name, assigned_operator, active_schedule_id FROM machines WHERE id = ?',
     [machineId]
   );
   if (localRows.length === 0) return;
@@ -140,13 +141,26 @@ async function pullMachineConfig(cloudUrl) {
   const differs = remote.target !== local.target
     || remote.ideal_cycle_time !== local.ideal_cycle_time
     || remotePart !== local.active_part_name
-    || remoteOperator !== local.assigned_operator;
+    || remoteOperator !== local.assigned_operator
+    || remote.active_schedule_id !== local.active_schedule_id;
 
   if (!differs) return;
 
+  // A part change pulled down from the cloud closes out the previous part's tally as its
+  // own permanent record before the new part starts counting from 0 on this gateway. The
+  // cloud's part_schedules id rides along as-is - this gateway has no schedule table of its
+  // own, it only ever mirrors whichever entry the cloud has already resolved as active.
+  if (remotePart !== local.active_part_name) {
+    await resetProductionCounters(machineId, 'part_change', null, {
+      scheduleId: local.active_schedule_id || null,
+      nextPartName: remotePart,
+      changeTrigger: 'cloud_sync'
+    });
+  }
+
   await db.query(
-    'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ? WHERE id = ?',
-    [remote.target, remote.ideal_cycle_time, remotePart, remoteOperator, machineId]
+    'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ?, active_schedule_id = ? WHERE id = ?',
+    [remote.target, remote.ideal_cycle_time, remotePart, remoteOperator, remote.active_schedule_id || null, machineId]
   );
   logger.info(`🔄 Sync: Pulled updated plan for machine ${machineId} from cloud (target=${remote.target}, cycle=${remote.ideal_cycle_time}s)`);
 
@@ -161,7 +175,7 @@ async function pullMachineConfig(cloudUrl) {
 async function synchronizeData(cloudUrl) {
   // 1. Fetch unsynced pulses (batch of 50)
   const [pulses] = await db.query(
-    'SELECT id, machine_id, timestamp, cycle_time, is_good FROM pulses WHERE synced = 0 ORDER BY id ASC LIMIT 50'
+    'SELECT id, machine_id, timestamp, cycle_time, is_good, part_schedule_id FROM pulses WHERE synced = 0 ORDER BY id ASC LIMIT 50'
   );
 
   // 2. Fetch unsynced status logs (batch of 50)

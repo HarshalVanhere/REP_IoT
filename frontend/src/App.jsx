@@ -22,7 +22,8 @@ import {
   Users,
   Download,
   Flame,
-  UserCheck
+  UserCheck,
+  PackageCheck
 } from 'lucide-react';
 import Header from './components/Header';
 import LoginScreen from './components/LoginScreen';
@@ -41,7 +42,8 @@ import roseLogo from './assets/rose logo (1).png';
 // them out of the main bundle.
 const AnalyticsCharts = lazy(() => import('./components/AnalyticsCharts'));
 const ReportsLog = lazy(() => import('./components/ReportsLog'));
-const ShiftPlanningCalendar = lazy(() => import('./components/ShiftPlanningCalendar'));
+const PartScheduleBoard = lazy(() => import('./components/PartScheduleBoard'));
+const ProductionSummary = lazy(() => import('./components/ProductionSummary'));
 
 function ViewLoadingFallback() {
   return (
@@ -437,6 +439,18 @@ function AppShell() {
   }, [authToken, socketConnected, initialLoadComplete, isKioskMode]);
 
 
+
+  const handleResetCount = async (machineId) => {
+    try {
+      await apiFetch(`/api/machines/${machineId}/reset-count`, { method: 'POST', token: authToken });
+      showToast(`Production counters reset for ${machineId}`, 'success');
+    } catch (err) {
+      if (!handleAuthError(err)) {
+        console.error(`Failed to reset counters for machine ${machineId}:`, err.message);
+        showToast(err.message || `Failed to reset counters for machine ${machineId}`, 'error');
+      }
+    }
+  };
 
   const handleStopMachine = async (machineId) => {
     try {
@@ -857,6 +871,22 @@ function AppShell() {
               {!sidebarCollapsed && <span>Downtime & Logs</span>}
             </button>
 
+            {/* 5.5 Production Summary (part-wise / shift-wise / machine-wise) */}
+            <button
+              onClick={() => { setActiveView('production-summary'); setMobileSidebarOpen(false); }}
+              disabled={sessionUser.role === 'Operator'}
+              className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
+                sessionUser.role === 'Operator'
+                  ? 'text-slate-300 cursor-not-allowed opacity-50'
+                  : activeView === 'production-summary'
+                  ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
+                  : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+              }`}
+            >
+              <PackageCheck className="w-5 h-5 shrink-0" />
+              {!sidebarCollapsed && <span>Production Summary</span>}
+            </button>
+
             {/* 6. Operator Simulator Panel */}
             <button
               onClick={() => { setActiveView('operator'); setMobileSidebarOpen(false); }}
@@ -1218,6 +1248,8 @@ function AppShell() {
                       key={machine.id}
                       machine={machine}
                       history={histories[machine.id] || []}
+                      canResetCount={sessionUser.role === 'Supervisor' || sessionUser.role === 'Admin'}
+                      onResetCount={handleResetCount}
                     />
                   ))
                 ) : (
@@ -1242,10 +1274,10 @@ function AppShell() {
               )}
             </div>
           ) : activeView === 'planning' ? (
-            // 4. Dated shift planning calendar (PPC scheduling, history, target-vs-actual, Excel export)
+            // 4. Dated multi-part shift scheduling board (PPC scheduling, sequencing, history, Excel export)
             <div className="w-full animate-in fade-in duration-200 text-left">
               <Suspense fallback={<ViewLoadingFallback />}>
-                <ShiftPlanningCalendar
+                <PartScheduleBoard
                   authToken={authToken}
                   machines={machines}
                   sessionUser={sessionUser}
@@ -1275,6 +1307,13 @@ function AppShell() {
                   <ReportsLog reports={filteredReports} machines={machines} currentUser={sessionUser} onRefresh={fetchReports} />
                 </Suspense>
               </div>
+            </div>
+          ) : activeView === 'production-summary' ? (
+            // 5.5 Part-wise / shift-wise / machine-wise production breakdown
+            <div className="w-full animate-in fade-in duration-200 text-left">
+              <Suspense fallback={<ViewLoadingFallback />}>
+                <ProductionSummary authToken={authToken} onAuthError={handleAuthError} />
+              </Suspense>
             </div>
           ) : activeView === 'users' ? (
             // 6. User Profiles CRUD Manager (Admin Only)

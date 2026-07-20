@@ -144,6 +144,33 @@ async function setup() {
       )
     `);
 
+    // Create production_records table (permanent history of each closed-out part/shift run)
+    console.log('🛠️  Creating "production_records" table...');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS production_records (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        machine_id VARCHAR(50) NOT NULL,
+        part_name VARCHAR(100) NULL,
+        operator VARCHAR(100) NULL,
+        shift VARCHAR(10) NULL,
+        target INT NOT NULL DEFAULT 0,
+        production_count INT NOT NULL DEFAULT 0,
+        good_count INT NOT NULL DEFAULT 0,
+        scrap_count INT NOT NULL DEFAULT 0,
+        reset_reason VARCHAR(50) NOT NULL,
+        reset_by VARCHAR(50) NULL,
+        start_time TIMESTAMP NULL,
+        end_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+      )
+    `);
+    try {
+      await connection.query('ALTER TABLE machines ADD COLUMN segment_start TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP');
+      console.log('   + Added "segment_start" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
     // Seed default plant accounts (default password: 1234 - change before go-live)
     console.log('🌱 Seeding default user accounts...');
     const seedUsers = [

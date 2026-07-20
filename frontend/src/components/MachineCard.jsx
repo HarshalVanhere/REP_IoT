@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, ResponsiveContainer } from 'recharts';
-import { Play, Ban, AlertTriangle, Clock, Target } from 'lucide-react';
+import { Play, Ban, AlertTriangle, Clock, Target, RotateCcw } from 'lucide-react';
 
-export default function MachineCard({ machine, history = [] }) {
+export default function MachineCard({ machine, history = [], canResetCount = false, onResetCount }) {
   const { id, name, status, target, production_count, ideal_cycle_time, last_pulse, metrics, active_part_name, assigned_operator } = machine;
   const { availability = 100, performance = 0, quality = 100, oee = 0, downtimeSeconds = 0 } = metrics || {};
 
@@ -114,9 +114,22 @@ export default function MachineCard({ machine, history = [] }) {
       </div>
 
       {/* 1.5 Active Part & Operator Info */}
-      <div className="flex justify-between text-xs bg-slate-50 border border-slate-200/50 rounded-xl px-3 py-2.5 mb-4 text-slate-600 font-extrabold uppercase tracking-wider text-left">
+      <div className="flex justify-between items-center text-xs bg-slate-50 border border-slate-200/50 rounded-xl px-3 py-2.5 mb-4 text-slate-600 font-extrabold uppercase tracking-wider text-left">
         <span className="truncate max-w-[170px]">Part: {active_part_name || 'Unassigned'}</span>
         <span className="shrink-0 font-mono text-slate-400">Op: {assigned_operator || 'None'}</span>
+        {canResetCount && (
+          <button
+            onClick={() => {
+              if (window.confirm(`Reset production counters for ${name}? Current tally will be saved to history first.`)) {
+                onResetCount(id);
+              }
+            }}
+            title="Reset production counters (emergency use)"
+            className="shrink-0 ml-2 p-1 rounded-lg border border-slate-200 hover:border-rose-300 hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition-colors"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
 
       {/* 2. Top Half: Gauges and Cycle stopwatch */}

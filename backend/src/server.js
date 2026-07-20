@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 
 import apiRouter from './routes/api.js';
 import authRouter from './routes/auth.js';
-import shiftPlansRouter from './routes/shiftPlans.js';
+import partSchedulesRouter from './routes/partSchedules.js';
 import db from './config/db.js';
 import { verifyToken } from './middleware/auth.js';
 import { startMQTTBroker } from './services/mqttService.js';
@@ -75,7 +75,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use('/api/auth', authRouter);
-app.use('/api/shift-plans', shiftPlansRouter);
+app.use('/api/part-schedules', partSchedulesRouter);
 app.use('/api', apiRouter);
 
 // Serve static frontend build files

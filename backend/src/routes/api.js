@@ -4,9 +4,11 @@ import db from '../config/db.js';
 import { calculateOEE } from '../services/oeeCalculator.js';
 import { handleStatusMessage, handleResumeMessage, publishMQTT } from '../services/mqttService.js';
 import { sendSerialCommand } from '../services/serialService.js';
+import { resetProductionCounters } from '../services/productionRecordService.js';
 import { requireAuth, requireRole, requireSyncKey } from '../middleware/auth.js';
 import { recordAuditLog } from '../utils/auditLog.js';
 import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
+import { getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
 import { logger } from '../utils/logger.js';
 
 const router = express.Router();
@@ -74,6 +76,41 @@ router.post('/machines/:id/stop', requireAuth, requireRole('Operator', 'Supervis
 });
 
 /**
+ * Manually reset a machine's live production counters (Supervisor/Admin only, emergency use).
+ * Closes out the current tally as a production_records entry (reason: manual_reset) before
+ * zeroing the counters, so nothing is lost - just moved into history.
+ */
+router.post('/machines/:id/reset-count', requireAuth, requireRole('Supervisor', 'Admin'), async (req, res) => {
+  const machineId = req.params.id;
+  try {
+    await resetProductionCounters(machineId, 'manual_reset', req.user.loginId);
+    await recordAuditLog(req.user.loginId, 'MACHINE_COUNT_RESET', machineId);
+    res.json({ success: true, message: `Production counters reset for machine ${machineId}` });
+  } catch (err) {
+    logger.error(`API Error: POST /machines/${machineId}/reset-count:`, err.message);
+    res.status(500).json({ error: `Failed to reset counters: ${err.message}` });
+  }
+});
+
+/**
+ * Retrieve this machine's closed-out production history (each part/shift run that was
+ * reset), most recent first.
+ */
+router.get('/machines/:id/production-records', requireAuth, async (req, res) => {
+  const machineId = req.params.id;
+  try {
+    const [records] = await db.query(
+      'SELECT * FROM production_records WHERE machine_id = ? ORDER BY end_time DESC LIMIT 100',
+      [machineId]
+    );
+    res.json(records);
+  } catch (err) {
+    logger.error(`API Error: GET /machines/${machineId}/production-records:`, err.message);
+    res.status(500).json({ error: 'Failed to retrieve production records' });
+  }
+});
+
+/**
  * Resume machine with downtime reason (Operator touchscreen interface action)
  */
 router.post('/machines/:id/resume', requireAuth, requireRole('Operator', 'Supervisor', 'Admin'), async (req, res) => {
@@ -115,6 +152,78 @@ router.get('/reports', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error('API/Reports Error:', err.message);
     res.status(500).json({ error: 'Failed to retrieve reports log' });
+  }
+});
+
+/**
+ * GET /api/reports/production-summary?date=YYYY-MM-DD&groupBy=part|shift|machine
+ * Aggregates closed-out part/shift runs from production_records for the given date, grouped
+ * by part/shift/machine as requested, plus each machine's still-in-progress (not yet closed)
+ * tally when the date is today - so a run that hasn't ended yet still counts toward the total.
+ */
+router.get('/reports/production-summary', requireAuth, async (req, res) => {
+  const { date } = req.query;
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'A valid date query param (YYYY-MM-DD) is required' });
+  }
+  const groupBy = ['part', 'shift', 'machine'].includes(req.query.groupBy) ? req.query.groupBy : 'part';
+
+  try {
+    const [allRecords] = await db.query('SELECT * FROM production_records');
+    const [machines] = await db.query('SELECT id, name FROM machines');
+    const machineNameById = Object.fromEntries(machines.map((m) => [m.id, m.name]));
+
+    const dayRows = allRecords
+      .filter((r) => toDateOnlyString(r.start_time) === date || toDateOnlyString(r.end_time) === date)
+      .map((r) => ({
+        machine_id: r.machine_id,
+        machine_name: machineNameById[r.machine_id] || r.machine_id,
+        part_name: r.part_name || 'Unassigned',
+        shift: r.shift || 'Unknown',
+        target: r.target || 0,
+        production_count: r.production_count || 0,
+        good_count: r.good_count || 0,
+        scrap_count: r.scrap_count || 0
+      }));
+
+    // Still-running (not yet closed) tallies count toward today's totals too.
+    if (date === toDateOnlyString()) {
+      const [liveMachines] = await db.query(
+        'SELECT id, name, active_part_name, target, production_count, good_count, scrap_count FROM machines WHERE production_count > 0'
+      );
+      for (const m of liveMachines) {
+        dayRows.push({
+          machine_id: m.id,
+          machine_name: m.name,
+          part_name: m.active_part_name || 'Unassigned',
+          shift: getShiftForTimestamp(new Date()),
+          target: m.target || 0,
+          production_count: m.production_count || 0,
+          good_count: m.good_count || 0,
+          scrap_count: m.scrap_count || 0
+        });
+      }
+    }
+
+    const keyOf = (row) => (groupBy === 'part' ? row.part_name : groupBy === 'shift' ? row.shift : row.machine_name);
+
+    const groups = new Map();
+    for (const row of dayRows) {
+      const key = keyOf(row);
+      if (!groups.has(key)) {
+        groups.set(key, { key, target: 0, production_count: 0, good_count: 0, scrap_count: 0 });
+      }
+      const g = groups.get(key);
+      g.target += row.target;
+      g.production_count += row.production_count;
+      g.good_count += row.good_count;
+      g.scrap_count += row.scrap_count;
+    }
+
+    res.json({ date, groupBy, rows: Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key)) });
+  } catch (err) {
+    logger.error('API Error: GET /reports/production-summary:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve production summary' });
   }
 });
 
@@ -305,7 +414,7 @@ router.setBroadcastCallback = (cb) => {
 router.get('/sync/machine-config/:machineId', requireSyncKey, async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, target, ideal_cycle_time, active_part_name, assigned_operator FROM machines WHERE id = ?',
+      'SELECT id, target, ideal_cycle_time, active_part_name, assigned_operator, active_schedule_id FROM machines WHERE id = ?',
       [req.params.machineId]
     );
     if (rows.length === 0) {
@@ -345,10 +454,12 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
       );
 
       if (existing.length === 0) {
-        // Insert pulse
+        // Insert pulse. part_schedule_id rides through as-is - it's the cloud's own schedule
+        // id in the first place (the gateway has no schedule table of its own, it only ever
+        // mirrors whichever entry the cloud already resolved as active via pullMachineConfig).
         await connection.query(
-          'INSERT INTO pulses (machine_id, timestamp, cycle_time, is_good, synced) VALUES (?, ?, ?, ?, TRUE)',
-          [pulse.machine_id, pulseTime, pulse.cycle_time, pulse.is_good]
+          'INSERT INTO pulses (machine_id, timestamp, cycle_time, is_good, part_schedule_id, synced) VALUES (?, ?, ?, ?, ?, TRUE)',
+          [pulse.machine_id, pulseTime, pulse.cycle_time, pulse.is_good, pulse.part_schedule_id || null]
         );
 
         // Update machine stats. Deliberately does NOT force status='Running' - these can be

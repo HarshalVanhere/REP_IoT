@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar } from 'lucide-react';
+import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package } from 'lucide-react';
 import DowntimeReasonModal from './DowntimeReasonModal';
 import jbmLogo from '../assets/jbmlogo (1).png';
 import roseLogo from '../assets/rose logo (1).png';
@@ -392,6 +392,14 @@ export default function OperatorTerminal({
                   <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
                     <Clock className="w-5 h-5 text-sky-400 shrink-0" />
                     <span className="text-lg font-black text-white font-mono uppercase leading-none">{dutyTimeStr}</span>
+                  </div>
+                  <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
+                    <Package className="w-5 h-5 text-emerald-400 shrink-0" />
+                    <span className="text-lg font-black text-white font-mono uppercase leading-none truncate max-w-[220px]">{active_part_name || 'General CNC Part'}</span>
+                  </div>
+                  <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
+                    <User className="w-5 h-5 text-amber-400 shrink-0" />
+                    <span className="text-lg font-black text-white font-mono uppercase leading-none truncate max-w-[220px]">{assigned_operator && assigned_operator !== 'Unassigned' ? assigned_operator : (loggedInOperator || 'Unassigned')}</span>
                   </div>
                 </div>
               </div>

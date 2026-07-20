@@ -1,45 +1,93 @@
 import db from '../config/db.js';
 import { handleStatusMessage } from './mqttService.js';
 import { sendSerialCommand } from './serialService.js';
+import { resetProductionCounters } from './productionRecordService.js';
+import { activateScheduleEntry } from './partScheduleService.js';
 import { logger } from '../utils/logger.js';
-import { applyPlanToMachine } from '../routes/shiftPlans.js';
 import { getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
 
+// Per-machine last-seen shift, so an actual shift boundary crossing (vs. just a same-shift
+// plan value edit) can be told apart and trigger a counter reset exactly once.
+const lastSeenShift = new Map();
+
+// Per-machine, once-per-shift-exhaustion log guard (avoids spamming the log every 10s once
+// a machine has run through its whole scheduled part list).
+const exhaustedLogged = new Set();
+
 /**
- * Applies today's scheduled shift plan (if any) to each machine whose live
- * target/cycle-time/part/operator has drifted from it. This is what makes a plan someone
- * scheduled yesterday for "tomorrow" actually take effect at shift-change with nobody online.
+ * Builds a local-time Date from a 'YYYY-MM-DD' date string and a 'HH:MM:SS' time string,
+ * matching the local-constructor pattern config/shifts.js already uses to avoid UTC-parsing
+ * ambiguity with bare ISO strings.
  */
-async function applyScheduledPlans() {
+function buildLocalDateTime(dateStr, timeStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const [hh, mm, ss] = timeStr.split(':').map(Number);
+  return new Date(year, month - 1, day, hh, mm, ss || 0);
+}
+
+/**
+ * Auto-advances each machine's active scheduled part: closes out the current entry and
+ * activates the next one in sequence when either its target quantity is reached or its
+ * planned end time arrives (whichever comes first), and resets counters at shift boundaries.
+ * All actual state transitions go through activateScheduleEntry() (the single choke-point
+ * shared with the PPC Engineer's manual override endpoint).
+ */
+async function applyScheduledParts() {
   const today = toDateOnlyString();
   const currentShift = getShiftForTimestamp(new Date());
+  const now = new Date();
 
   const [machines] = await db.query('SELECT * FROM machines');
-  const [todaysPlans] = await db.query(
-    'SELECT * FROM shift_plans WHERE plan_date = ? AND shift = ?',
+  const [todaysEntries] = await db.query(
+    'SELECT * FROM part_schedules WHERE plan_date = ? AND shift = ? ORDER BY sequence ASC',
     [today, currentShift]
   );
 
   for (const machine of machines) {
-    const plan = todaysPlans.find((p) => p.machine_id === machine.id);
-    if (!plan) continue;
+    // Only reset once we've actually observed a prior shift for this machine (skips a
+    // spurious reset on process boot, when nothing has been "seen" yet).
+    const previousShift = lastSeenShift.get(machine.id);
+    if (previousShift && previousShift !== currentShift) {
+      await resetProductionCounters(machine.id, 'shift_change');
+      await db.query('UPDATE machines SET active_schedule_id = NULL WHERE id = ?', [machine.id]);
+      machine.active_schedule_id = null;
+      machine.production_count = 0;
+      exhaustedLogged.delete(machine.id);
+      logger.info(`⏰ Watchdog: Shift boundary crossed for machine ${machine.id} (${previousShift} -> ${currentShift}), production counters reset.`);
+    }
+    lastSeenShift.set(machine.id, currentShift);
 
-    const plannedPart = plan.part_name || 'Unassigned';
-    const plannedOperator = plan.operator || 'Unassigned';
-    const differs = plan.target !== machine.target
-      || plan.ideal_cycle_time !== machine.ideal_cycle_time
-      || plannedPart !== machine.active_part_name
-      || plannedOperator !== machine.assigned_operator;
+    const machineEntries = todaysEntries.filter((e) => e.machine_id === machine.id);
+    if (machineEntries.length === 0) continue; // no schedule for this machine/shift - legacy/manual mode
 
-    if (differs) {
-      await applyPlanToMachine({
-        machine_id: machine.id,
-        target: plan.target,
-        ideal_cycle_time: plan.ideal_cycle_time,
-        part_name: plan.part_name,
-        operator: plan.operator
-      });
-      logger.info(`⏰ Watchdog: Auto-applied scheduled shift plan to machine ${machine.id} for ${currentShift}`);
+    const activeEntries = machineEntries.filter((e) => e.status !== 'Completed' && e.status !== 'Skipped');
+    const currentEntry = machineEntries.find((e) => e.id === machine.active_schedule_id) || null;
+
+    let nextEntry = null;
+    let trigger = null;
+
+    if (currentEntry) {
+      const targetReached = machine.production_count >= currentEntry.target;
+      const endTimeReached = now >= buildLocalDateTime(today, currentEntry.planned_end);
+
+      if (targetReached || endTimeReached) {
+        nextEntry = activeEntries.find((e) => e.sequence > currentEntry.sequence) || null;
+        trigger = targetReached ? 'auto_target_reached' : 'auto_end_time';
+
+        if (!nextEntry && !exhaustedLogged.has(machine.id)) {
+          logger.info(`⏰ Watchdog: Machine ${machine.id} has finished its last scheduled part ("${currentEntry.part_name}") with no further entries queued - leaving it active.`);
+          exhaustedLogged.add(machine.id);
+        }
+      }
+    } else {
+      // Nothing active yet this shift - activate the first pending entry whose window has opened.
+      nextEntry = activeEntries.find((e) => e.status === 'Pending' && buildLocalDateTime(today, e.planned_start) <= now) || null;
+      trigger = 'auto_start';
+    }
+
+    if (nextEntry) {
+      exhaustedLogged.delete(machine.id);
+      await activateScheduleEntry(machine.id, nextEntry, { changedBy: 'system', changeTrigger: trigger });
     }
   }
 }
@@ -75,9 +123,9 @@ export function startWatchdogService(broadcast) {
 
   watchdogInterval = setInterval(async () => {
     try {
-      await applyScheduledPlans();
+      await applyScheduledParts();
     } catch (err) {
-      logger.error('Watchdog Service Error (scheduled plan sync):', err.message);
+      logger.error('Watchdog Service Error (scheduled part sync):', err.message);
     }
 
     try {

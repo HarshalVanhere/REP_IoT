@@ -28,13 +28,19 @@ const mockDb = {
   status_logs: [],
   users: [],
   audit_log: [],
-  shift_plans: []
+  shift_plans: [],
+  production_records: [],
+  part_schedules: []
 };
+
+mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; });
 
 let mockPulseId = 1;
 let mockLogId = 1;
 let mockAuditId = 1;
 let mockShiftPlanId = 1;
+let mockProductionRecordId = 1;
+let mockPartScheduleId = 1;
 
 // Seed rich mock data
 function seedMockData() {
@@ -256,6 +262,159 @@ try {
         FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
       )
     `);
+
+    // Create production_records table: a permanent snapshot of each part/shift run's counts,
+    // written just before the live counters on `machines` are reset to 0 (shift change, part
+    // change, or a manual Supervisor/Admin reset). Nothing is ever deleted here - this is the
+    // append-only history that the live production_count/good_count/scrap_count columns lose.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS production_records (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        machine_id VARCHAR(50) NOT NULL,
+        part_name VARCHAR(100) NULL,
+        operator VARCHAR(100) NULL,
+        shift VARCHAR(10) NULL,
+        target INT NOT NULL DEFAULT 0,
+        production_count INT NOT NULL DEFAULT 0,
+        good_count INT NOT NULL DEFAULT 0,
+        scrap_count INT NOT NULL DEFAULT 0,
+        reset_reason VARCHAR(50) NOT NULL,
+        reset_by VARCHAR(50) NULL,
+        start_time TIMESTAMP NULL,
+        end_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Tracks when the current live-count segment started, so production_records can log an
+    // accurate start_time for each closed-out run.
+    try {
+      await pool.query('ALTER TABLE machines ADD COLUMN segment_start TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP');
+      console.log('   + Added "segment_start" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
+    // Create part_schedules table: an ordered, unlimited-length list of parts a machine runs
+    // sequentially within one shift (replaces shift_plans, which only allowed one part per
+    // shift). `sequence` determines run order; `status` is written by the watchdog/manual
+    // override, never derived client-side, so the Planning Board's badges can never drift
+    // from what actually happened.
+    console.log('🛠️  Creating "part_schedules" table...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS part_schedules (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        machine_id VARCHAR(50) NOT NULL,
+        plan_date DATE NOT NULL,
+        shift VARCHAR(10) NOT NULL,
+        sequence INT NOT NULL,
+        part_name VARCHAR(100) NOT NULL,
+        target INT NOT NULL,
+        ideal_cycle_time INT NOT NULL,
+        operator VARCHAR(100) NULL,
+        planned_start TIME NOT NULL,
+        planned_end TIME NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'Pending',
+        activated_at TIMESTAMP NULL,
+        completed_at TIMESTAMP NULL,
+        created_by VARCHAR(50) NULL,
+        updated_by VARCHAR(50) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_machine_date_shift_seq (machine_id, plan_date, shift, sequence),
+        FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Points from the live machine row to whichever part_schedules entry is currently active,
+    // so the watchdog/override logic knows what to close out and pulses know what to stamp.
+    try {
+      await pool.query('ALTER TABLE machines ADD COLUMN active_schedule_id INT NULL');
+      console.log('   + Added "active_schedule_id" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
+    // Stamped at ingest time (not derived via a time-window join) so per-part production
+    // stays correct even when a manual override or a forced end-time cutover makes actual
+    // execution diverge from the planned start/end window.
+    try {
+      await pool.query('ALTER TABLE pulses ADD COLUMN part_schedule_id INT NULL');
+      console.log('   + Added "part_schedule_id" column to pulses table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
+    // production_records doubles as both the counter-close-out history (existing purpose)
+    // and the part-change audit trail (previous/next part, who changed it, why) - one table
+    // instead of two that could drift out of sync with each other.
+    const productionRecordAuditColumns = [
+      ['schedule_id', 'INT NULL'],
+      ['previous_part_name', 'VARCHAR(100) NULL'],
+      ['next_part_name', 'VARCHAR(100) NULL'],
+      ['changed_by', 'VARCHAR(50) NULL'],
+      ['change_trigger', 'VARCHAR(30) NULL'],
+      ['change_reason', 'VARCHAR(255) NULL']
+    ];
+    for (const [column, definition] of productionRecordAuditColumns) {
+      try {
+        await pool.query(`ALTER TABLE production_records ADD COLUMN ${column} ${definition}`);
+        console.log(`   + Added "${column}" column to production_records table`);
+      } catch (err) {
+        // Ignore if column already exists
+      }
+    }
+
+    // One-off migration: carry forward any current/future shift_plans rows into part_schedules
+    // as a single sequence-1 entry, so existing PPC-entered plans aren't lost when the planning
+    // module switches to the multi-part model. Guarded so it only ever runs once.
+    try {
+      const [existingSchedules] = await pool.query('SELECT COUNT(*) as count FROM part_schedules');
+      if (existingSchedules[0].count === 0) {
+        const { toDateOnlyString } = await import('./shifts.js');
+        const today = toDateOnlyString();
+        const [legacyPlans] = await pool.query('SELECT * FROM shift_plans WHERE plan_date >= ?', [today]);
+
+        const shiftWindowMinutes = {
+          'Shift A': { start: 7 * 60, end: 15.5 * 60 },
+          'Shift B': { start: 15.5 * 60, end: 24 * 60 },
+          'Shift C': { start: 0, end: 7 * 60 }
+        };
+        const toTimeString = (minutes) => {
+          const m = minutes % (24 * 60);
+          const hh = String(Math.floor(m / 60)).padStart(2, '0');
+          const mm = String(Math.round(m % 60)).padStart(2, '0');
+          return `${hh}:${mm}:00`;
+        };
+
+        for (const plan of legacyPlans) {
+          const window = shiftWindowMinutes[plan.shift] || shiftWindowMinutes['Shift A'];
+          const [machineRows] = await pool.query('SELECT active_part_name FROM machines WHERE id = ?', [plan.machine_id]);
+          const isCurrentlyActive = machineRows.length > 0 && machineRows[0].active_part_name === (plan.part_name || 'Unassigned');
+
+          const [insertResult] = await pool.query(
+            `INSERT INTO part_schedules
+              (machine_id, plan_date, shift, sequence, part_name, target, ideal_cycle_time, operator, planned_start, planned_end, status, activated_at, created_by, updated_by)
+             VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              plan.machine_id, plan.plan_date, plan.shift, plan.part_name || 'Unassigned', plan.target, plan.ideal_cycle_time,
+              plan.operator || 'Unassigned', toTimeString(window.start), toTimeString(window.end),
+              isCurrentlyActive ? 'Running' : 'Pending', isCurrentlyActive ? new Date() : null,
+              plan.created_by, plan.updated_by
+            ]
+          );
+
+          if (isCurrentlyActive) {
+            await pool.query('UPDATE machines SET active_schedule_id = ? WHERE id = ?', [insertResult.insertId, plan.machine_id]);
+          }
+        }
+        if (legacyPlans.length > 0) {
+          console.log(`   + Migrated ${legacyPlans.length} shift_plans row(s) into part_schedules`);
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️  shift_plans -> part_schedules migration skipped:', err.message);
+    }
   }
 } catch (error) {
   if (process.env.NODE_ENV === 'production') {
@@ -289,6 +448,10 @@ async function mockQuery(sql, params = []) {
     if (normalizedSql.includes('where machine_id = ?')) {
       const mId = params[0];
       filtered = filtered.filter(p => p.machine_id === mId);
+    }
+    if (normalizedSql.includes('where part_schedule_id = ?')) {
+      const scheduleId = params[0];
+      filtered = filtered.filter(p => p.part_schedule_id === scheduleId);
     }
     if (normalizedSql.includes('timestamp >= ?') || normalizedSql.includes('timestamp >=?')) {
       const minDate = params[1];
@@ -330,11 +493,15 @@ async function mockQuery(sql, params = []) {
 
   // 4. INSERT INTO pulses
   if (normalizedSql.startsWith('insert into pulses')) {
+    const colMatch = sql.match(/\(([^)]+)\)/);
+    const columns = colMatch ? colMatch[1].split(',').map(c => c.trim().toLowerCase()) : [];
     const pulse = {
       id: mockPulseId++,
       machine_id: params[0],
       timestamp: params[1] || new Date(),
-      cycle_time: parseFloat(params[2] || 0)
+      cycle_time: parseFloat(params[2] || 0),
+      is_good: params[3] !== undefined ? params[3] : true,
+      part_schedule_id: columns.includes('part_schedule_id') ? params[columns.indexOf('part_schedule_id')] : null
     };
     mockDb.pulses.push(pulse);
     return [{ insertId: pulse.id, affectedRows: 1 }, []];
@@ -437,6 +604,17 @@ async function mockQuery(sql, params = []) {
         machine.ideal_cycle_time = parseInt(idealCycleTime);
         affectedRows = 1;
       }
+    } else if (sqlLower.includes('set target') && sqlLower.includes('active_schedule_id')) {
+      const [target, ideal, part, operator, scheduleId, machineId] = params;
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.target = parseInt(target);
+        machine.ideal_cycle_time = parseInt(ideal);
+        machine.active_part_name = part;
+        machine.assigned_operator = operator;
+        machine.active_schedule_id = scheduleId;
+        affectedRows = 1;
+      }
     } else if (sqlLower.includes('set target')) {
       const target = params[0];
       const ideal = params[1];
@@ -449,6 +627,30 @@ async function mockQuery(sql, params = []) {
         machine.ideal_cycle_time = parseInt(ideal);
         machine.active_part_name = part;
         machine.assigned_operator = operator;
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set active_schedule_id = null')) {
+      const machineId = params[0];
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.active_schedule_id = null;
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set production_count = 0')) {
+      const machineId = params[0];
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.production_count = 0;
+        machine.good_count = 0;
+        machine.scrap_count = 0;
+        machine.segment_start = new Date();
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set segment_start = now()')) {
+      const machineId = params[0];
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.segment_start = new Date();
         affectedRows = 1;
       }
     } else if (sqlLower.includes('set status = ?')) {
@@ -649,6 +851,177 @@ async function mockQuery(sql, params = []) {
       plan.updated_at = new Date();
     }
     return [{ affectedRows: plan ? 1 : 0 }, []];
+  }
+
+  // 19. SELECT FROM production_records
+  if (normalizedSql.includes('from production_records')) {
+    let filtered = [...mockDb.production_records];
+    if (normalizedSql.includes('where machine_id = ?')) {
+      const mId = params[0];
+      filtered = filtered.filter(r => r.machine_id === mId);
+    }
+    filtered.sort((a, b) => new Date(b.end_time) - new Date(a.end_time));
+    return [JSON.parse(JSON.stringify(filtered.slice(0, 100))), []];
+  }
+
+  // 20. INSERT INTO production_records
+  if (sqlLower.startsWith('insert into production_records')) {
+    const [
+      machineId, partName, operator, shift, target, productionCount, goodCount, scrapCount, resetReason, resetBy, startTime,
+      scheduleId, previousPartName, nextPartName, changedBy, changeTrigger, changeReason
+    ] = params;
+    const record = {
+      id: mockProductionRecordId++,
+      machine_id: machineId,
+      part_name: partName,
+      operator,
+      shift,
+      target: parseInt(target) || 0,
+      production_count: parseInt(productionCount) || 0,
+      good_count: parseInt(goodCount) || 0,
+      scrap_count: parseInt(scrapCount) || 0,
+      reset_reason: resetReason,
+      reset_by: resetBy,
+      start_time: startTime,
+      end_time: new Date(),
+      schedule_id: scheduleId ?? null,
+      previous_part_name: previousPartName ?? null,
+      next_part_name: nextPartName ?? null,
+      changed_by: changedBy ?? null,
+      change_trigger: changeTrigger ?? null,
+      change_reason: changeReason ?? null
+    };
+    mockDb.production_records.push(record);
+    return [{ insertId: record.id, affectedRows: 1 }, []];
+  }
+
+  // 21a. SELECT COALESCE(MAX(sequence), 0) FROM part_schedules (aggregate, next-sequence lookup)
+  if (normalizedSql.includes('max(sequence)') && normalizedSql.includes('from part_schedules')) {
+    const [mId, planDate, shift] = params;
+    const filtered = mockDb.part_schedules.filter(p => p.machine_id === mId && p.plan_date === planDate && p.shift === shift);
+    const maxSeq = filtered.length > 0 ? Math.max(...filtered.map(p => p.sequence)) : 0;
+    return [[{ maxSeq }], []];
+  }
+
+  // 21. SELECT FROM part_schedules
+  if (normalizedSql.includes('from part_schedules')) {
+    let filtered = [...mockDb.part_schedules];
+    if (normalizedSql.includes('where id = ?')) {
+      const id = params[0];
+      filtered = filtered.filter(p => p.id === id);
+    } else if (normalizedSql.includes('machine_id = ?') && normalizedSql.includes('shift = ?') && normalizedSql.includes('sequence > ?')) {
+      const [mId, planDate, shift, seq] = params;
+      filtered = filtered.filter(p => p.machine_id === mId && p.plan_date === planDate && p.shift === shift && p.sequence > seq);
+    } else if (normalizedSql.includes('machine_id = ?') && normalizedSql.includes('shift = ?') && normalizedSql.includes('sequence = ?')) {
+      const [mId, planDate, shift, seq] = params;
+      filtered = filtered.filter(p => p.machine_id === mId && p.plan_date === planDate && p.shift === shift && p.sequence === seq);
+    } else if (normalizedSql.includes('machine_id = ?') && normalizedSql.includes('shift = ?')) {
+      const [mId, planDate, shift] = params;
+      filtered = filtered.filter(p => p.machine_id === mId && p.plan_date === planDate && p.shift === shift);
+    } else if (normalizedSql.includes('machine_id = ?') && normalizedSql.includes('plan_date = ?')) {
+      const [mId, planDate] = params;
+      filtered = filtered.filter(p => p.machine_id === mId && p.plan_date === planDate);
+    } else if (normalizedSql.includes('plan_date = ?')) {
+      const planDate = params[0];
+      filtered = filtered.filter(p => p.plan_date === planDate);
+    }
+    filtered.sort((a, b) => a.sequence - b.sequence);
+    return [JSON.parse(JSON.stringify(filtered)), []];
+  }
+
+  // 22. INSERT INTO part_schedules
+  if (sqlLower.startsWith('insert into part_schedules')) {
+    const colMatch = sql.match(/\(([^)]+)\)/);
+    const columns = colMatch ? colMatch[1].split(',').map(c => c.trim().toLowerCase()) : [];
+    const valMatch = sql.match(/values\s*\(([^)]+)\)/i);
+    const valStrings = valMatch ? valMatch[1].split(',').map(v => v.trim()) : [];
+
+    const entry = {
+      id: mockPartScheduleId++,
+      machine_id: null, plan_date: null, shift: null, sequence: 1, part_name: null,
+      target: 0, ideal_cycle_time: 15, operator: null, planned_start: '00:00:00', planned_end: '00:00:00',
+      status: 'Pending', activated_at: null, completed_at: null, created_by: null, updated_by: null,
+      created_at: new Date(), updated_at: new Date()
+    };
+
+    // Columns can mix '?' placeholders with SQL literals (e.g. the fixed 'Pending' status in
+    // the real INSERT) - only advance the params index for actual placeholders, matching the
+    // parsing pattern already used for INSERT INTO status_logs above.
+    let paramIndex = 0;
+    columns.forEach((col, idx) => {
+      const valStr = valStrings[idx];
+      let value;
+      if (valStr === '?') {
+        value = params[paramIndex++];
+      } else if (valStr === undefined || valStr.toLowerCase() === 'null') {
+        value = null;
+      } else {
+        value = valStr.replace(/['"]/g, '');
+      }
+      if (col in entry) entry[col] = value;
+    });
+
+    entry.target = parseInt(entry.target) || 0;
+    entry.ideal_cycle_time = parseInt(entry.ideal_cycle_time) || 15;
+    entry.sequence = parseInt(entry.sequence) || 1;
+    mockDb.part_schedules.push(entry);
+    return [{ insertId: entry.id, affectedRows: 1 }, []];
+  }
+
+  // 23. UPDATE part_schedules
+  if (sqlLower.startsWith('update part_schedules')) {
+    // Bulk sequence renumber: UPDATE part_schedules SET sequence = ? WHERE id = ?
+    if (sqlLower.includes('set sequence = ?') && !sqlLower.includes('status')) {
+      const [sequence, id] = params;
+      const entry = mockDb.part_schedules.find(p => p.id === id);
+      if (entry) {
+        entry.sequence = parseInt(sequence);
+        entry.updated_at = new Date();
+      }
+      return [{ affectedRows: entry ? 1 : 0 }, []];
+    }
+    // Activation transition: SET status = 'Running', activated_at = NOW() WHERE id = ?
+    // (status is a literal in the real SQL, not a placeholder - only `id` is passed as a param)
+    if (sqlLower.includes('activated_at')) {
+      const id = params[0];
+      const entry = mockDb.part_schedules.find(p => p.id === id);
+      if (entry) {
+        entry.status = 'Running';
+        entry.activated_at = new Date();
+      }
+      return [{ affectedRows: entry ? 1 : 0 }, []];
+    }
+    // Completion transition: SET status = 'Completed', completed_at = NOW() WHERE id = ?
+    if (sqlLower.includes('completed_at')) {
+      const id = params[0];
+      const entry = mockDb.part_schedules.find(p => p.id === id);
+      if (entry) {
+        entry.status = 'Completed';
+        entry.completed_at = new Date();
+      }
+      return [{ affectedRows: entry ? 1 : 0 }, []];
+    }
+    // Generic field edit: SET target=?, ideal_cycle_time=?, operator=?, planned_start=?, planned_end=?, updated_by=? WHERE id=?
+    const [target, idealCycleTime, operator, plannedStart, plannedEnd, updatedBy, id] = params;
+    const entry = mockDb.part_schedules.find(p => p.id === id);
+    if (entry) {
+      entry.target = parseInt(target);
+      entry.ideal_cycle_time = parseInt(idealCycleTime);
+      entry.operator = operator || null;
+      entry.planned_start = plannedStart;
+      entry.planned_end = plannedEnd;
+      entry.updated_by = updatedBy || null;
+      entry.updated_at = new Date();
+    }
+    return [{ affectedRows: entry ? 1 : 0 }, []];
+  }
+
+  // 24. DELETE FROM part_schedules
+  if (sqlLower.startsWith('delete from part_schedules')) {
+    const id = params[0];
+    const before = mockDb.part_schedules.length;
+    mockDb.part_schedules = mockDb.part_schedules.filter(p => p.id !== id);
+    return [{ affectedRows: before - mockDb.part_schedules.length }, []];
   }
 
   return [{ affectedRows: 0 }, []];

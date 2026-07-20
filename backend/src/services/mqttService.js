@@ -112,10 +112,12 @@ export async function handlePulseMessage(machineId, payload) {
     return;
   }
 
-  // 2. Insert pulse log into database
+  // 2. Insert pulse log into database, stamped with whichever scheduled part is currently
+  // active (if any) so per-part production can be attributed correctly even when execution
+  // has diverged from the plan (manual overrides, forced end-time cutovers).
   await db.query(
-    'INSERT INTO pulses (machine_id, timestamp, cycle_time, is_good) VALUES (?, ?, ?, ?)',
-    [machineId, timestamp, cycleTime, isGood]
+    'INSERT INTO pulses (machine_id, timestamp, cycle_time, is_good, part_schedule_id) VALUES (?, ?, ?, ?, ?)',
+    [machineId, timestamp, cycleTime, isGood, machines[0].active_schedule_id || null]
   );
 
   // 3. Update machine metrics in the database.

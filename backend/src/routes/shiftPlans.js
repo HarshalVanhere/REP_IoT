@@ -4,6 +4,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { recordAuditLog } from '../utils/auditLog.js';
 import { logger } from '../utils/logger.js';
 import { handleStatusMessage } from '../services/mqttService.js';
+import { resetProductionCounters } from '../services/productionRecordService.js';
 import { SHIFT_NAMES, getShiftForTimestamp, getShiftWindow, toDateOnlyString } from '../config/shifts.js';
 
 const router = express.Router();
@@ -19,12 +20,21 @@ function isCurrentDateShift(planDate, shift) {
  * date+shift is the one active right now.
  */
 export async function applyPlanToMachine(plan) {
+  const [machines] = await db.query('SELECT status, active_part_name FROM machines WHERE id = ?', [plan.machine_id]);
+  const status = machines.length > 0 ? machines[0].status : 'Running';
+  const newPartName = plan.part_name || 'Unassigned';
+
+  // A part change mid-shift closes out the previous part's tally as its own permanent
+  // record before the new part starts counting from 0. A same-part edit (target/operator
+  // only) does not reset anything.
+  if (machines.length > 0 && machines[0].active_part_name !== newPartName) {
+    await resetProductionCounters(plan.machine_id, 'part_change');
+  }
+
   await db.query(
     'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ? WHERE id = ?',
-    [plan.target, plan.ideal_cycle_time, plan.part_name || 'Unassigned', plan.operator || 'Unassigned', plan.machine_id]
+    [plan.target, plan.ideal_cycle_time, newPartName, plan.operator || 'Unassigned', plan.machine_id]
   );
-  const [machines] = await db.query('SELECT status FROM machines WHERE id = ?', [plan.machine_id]);
-  const status = machines.length > 0 ? machines[0].status : 'Running';
   await handleStatusMessage(plan.machine_id, status);
 }
 
