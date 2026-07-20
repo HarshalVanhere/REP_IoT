@@ -266,15 +266,15 @@ export default function OperatorTerminal({
           </div>
 
           {/* Core Telemetry Stats Area */}
-          <div className="grid grid-cols-12 gap-4 flex-1 my-2 min-h-0 overflow-hidden items-stretch relative z-10">
+          <div className="grid grid-cols-12 gap-3 flex-1 my-1.5 min-h-0 overflow-hidden items-stretch relative z-10">
 
             {/* Left Card: Production */}
             <div className="col-span-5 bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-2xl shadow-black/40">
               <div className="bg-gradient-to-r from-sky-950 to-slate-900 border-b-2 border-sky-900/40 py-3 text-center shrink-0">
                 <span className="text-base font-black tracking-widest text-sky-300 uppercase">Production</span>
               </div>
-              <div className="flex-1 flex flex-col items-center justify-center p-2 min-h-0">
-                <div className="relative flex items-center justify-center shrink min-h-0 w-36 h-36">
+              <div className="flex-1 flex flex-col items-center justify-center p-1 min-h-0">
+                <div className="relative flex items-center justify-center shrink min-h-0 w-60 h-60">
                   <div className="absolute w-[75%] h-[75%] rounded-full bg-sky-500/10 blur-2xl" />
                   <svg className="w-full h-full transform -rotate-90" viewBox="0 0 160 160">
                     <circle
@@ -296,9 +296,9 @@ export default function OperatorTerminal({
                     />
                   </svg>
                   <div className="absolute flex flex-col items-center justify-center">
-                    <span className="text-4xl font-black text-slate-100 font-mono leading-none">{production_count}</span>
-                    <span className="text-slate-400 font-extrabold text-xs tracking-wide uppercase mt-1.5">/ {target} Parts</span>
-                    <span className="text-sm font-black text-sky-400 mt-1 uppercase tracking-wide">{achievementRate.toFixed(0)}% Done</span>
+                    <span className="text-7xl font-black text-slate-100 font-mono leading-none">{production_count}</span>
+                    <span className="text-slate-400 font-extrabold text-base tracking-wide uppercase mt-2">/ {target} Parts</span>
+                    <span className="text-2xl font-black text-sky-400 mt-1.5 uppercase tracking-wide">{achievementRate.toFixed(0)}% Done</span>
                   </div>
                 </div>
               </div>
@@ -312,21 +312,21 @@ export default function OperatorTerminal({
                 <div className={`bg-gradient-to-r ${statusTheme.grad} to-slate-900 border-b-2 ${statusTheme.border} py-2 text-center shrink-0`}>
                   <span className="text-xs font-black tracking-widest text-slate-200 uppercase">Status</span>
                 </div>
-                <div className="flex-1 flex flex-col items-center justify-center p-2 text-center gap-2.5 min-h-0">
+                <div className="flex-1 flex flex-col items-center justify-center p-2 text-center gap-3 min-h-0">
                   {status === 'Running' ? (
-                    <div className="w-16 h-16 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center text-white shadow-xl shadow-emerald-900/60 shrink-0">
-                      <Play className="w-7 h-7 fill-white text-white translate-x-0.5" />
+                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center text-white shadow-xl shadow-emerald-900/60 shrink-0">
+                      <Play className="w-11 h-11 fill-white text-white translate-x-0.5" />
                     </div>
                   ) : status === 'Stopped' ? (
-                    <div className="w-16 h-16 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 flex items-center justify-center text-white shadow-xl shadow-rose-900/60 shrink-0">
-                      <Ban className="w-7 h-7 text-white" />
+                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 flex items-center justify-center text-white shadow-xl shadow-rose-900/60 shrink-0">
+                      <Ban className="w-11 h-11 text-white" />
                     </div>
                   ) : (
-                    <div className="w-16 h-16 rounded-full bg-gradient-to-br from-violet-500 to-violet-700 flex items-center justify-center text-white shadow-xl shadow-violet-900/60 shrink-0">
-                      <AlertTriangle className="w-7 h-7 text-white" />
+                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-violet-500 to-violet-700 flex items-center justify-center text-white shadow-xl shadow-violet-900/60 shrink-0">
+                      <AlertTriangle className="w-11 h-11 text-white" />
                     </div>
                   )}
-                  <span className={`text-base font-black uppercase tracking-wide leading-none ${statusTheme.text}`}>
+                  <span className={`text-2xl font-black uppercase tracking-wide leading-none ${statusTheme.text}`}>
                     {status}
                   </span>
                 </div>
@@ -337,12 +337,12 @@ export default function OperatorTerminal({
                 <div className="bg-gradient-to-r from-sky-950 to-slate-900 border-b-2 border-sky-900/40 py-2 text-center shrink-0">
                   <span className="text-xs font-black tracking-widest text-sky-300 uppercase">Active Cycle</span>
                 </div>
-                <div className="flex-1 flex flex-col items-center justify-center p-2 text-center gap-2 min-h-0">
-                  <Clock className="w-7 h-7 text-sky-400 animate-pulse shrink-0" />
-                  <span className="text-3xl font-black font-mono text-slate-100 leading-none">
+                <div className="flex-1 flex flex-col items-center justify-center p-1 text-center gap-1.5 min-h-0">
+                  <Clock className="w-10 h-10 text-sky-400 animate-pulse shrink-0" />
+                  <span className="text-6xl font-black font-mono text-slate-100 leading-none">
                     {status === 'Running' ? `${cycleTimer.toFixed(1)}s` : '0.0s'}
                   </span>
-                  <span className="text-xs font-bold text-slate-400 uppercase leading-none">Ideal: {ideal_cycle_time}s</span>
+                  <span className="text-base font-bold text-slate-400 uppercase leading-none">Ideal: {ideal_cycle_time}s</span>
                 </div>
               </div>
 
@@ -351,17 +351,17 @@ export default function OperatorTerminal({
                 <div className="bg-gradient-to-r from-sky-950 to-slate-900 border-b-2 border-sky-900/40 py-2 text-center shrink-0">
                   <span className="text-xs font-black tracking-widest text-sky-300 uppercase">Last Cycle</span>
                 </div>
-                <div className="flex-1 flex flex-col items-center justify-center p-2 text-center gap-2 min-h-0">
-                  <Clock className="w-7 h-7 text-sky-400 shrink-0" />
-                  <span className="text-3xl font-black font-mono text-slate-100 leading-none">
+                <div className="flex-1 flex flex-col items-center justify-center p-1 text-center gap-1.5 min-h-0">
+                  <Clock className="w-10 h-10 text-sky-400 shrink-0" />
+                  <span className="text-6xl font-black font-mono text-slate-100 leading-none">
                     {lastCycleTime > 0 ? `${lastCycleTime.toFixed(2)}s` : '10.88s'}
                   </span>
                   {lastCycleTime > 0 ? (
-                    <span className={`text-xs font-black uppercase leading-none ${lastCycleTime <= ideal_cycle_time ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    <span className={`text-base font-black uppercase leading-none ${lastCycleTime <= ideal_cycle_time ? 'text-emerald-400' : 'text-amber-400'}`}>
                       Perf: {(ideal_cycle_time / lastCycleTime * 100).toFixed(0)}%
                     </span>
                   ) : (
-                    <span className="text-xs font-bold text-emerald-400 uppercase leading-none">Perf: 110%</span>
+                    <span className="text-base font-bold text-emerald-400 uppercase leading-none">Perf: 110%</span>
                   )}
                 </div>
               </div>
@@ -370,24 +370,24 @@ export default function OperatorTerminal({
           </div>
 
           {/* Shift & Duty Strip */}
-          <div className="w-full bg-gradient-to-r from-slate-900 via-violet-950/40 to-slate-900 border-2 border-slate-800 rounded-2xl px-5 py-2 flex items-center justify-around shrink-0 shadow-lg shadow-black/30 relative z-10">
-            <div className="flex items-center gap-3">
-              <div className="p-1.5 bg-violet-900/40 text-violet-400 rounded-xl border border-violet-800/50">
-                <Calendar className="w-5 h-5" />
+          <div className="w-full bg-gradient-to-r from-slate-900 via-violet-950/40 to-slate-900 border-2 border-slate-800 rounded-2xl px-6 py-3 flex items-center justify-around shrink-0 shadow-lg shadow-black/30 relative z-10">
+            <div className="flex items-center gap-4">
+              <div className="p-2.5 bg-violet-900/40 text-violet-400 rounded-xl border border-violet-800/50">
+                <Calendar className="w-8 h-8" />
               </div>
               <div className="text-left leading-none">
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block mb-1">Current Shift</span>
-                <span className="text-xl font-black text-white font-mono block uppercase">{currentShift}</span>
+                <span className="text-sm font-bold text-slate-400 uppercase tracking-widest block mb-1.5">Current Shift</span>
+                <span className="text-3xl font-black text-white font-mono block uppercase">{currentShift}</span>
               </div>
             </div>
-            <div className="w-px h-9 bg-slate-800"></div>
-            <div className="flex items-center gap-3">
-              <div className="p-1.5 bg-sky-900/40 text-sky-400 rounded-xl border border-sky-800/50">
-                <Clock className="w-5 h-5" />
+            <div className="w-px h-12 bg-slate-800"></div>
+            <div className="flex items-center gap-4">
+              <div className="p-2.5 bg-sky-900/40 text-sky-400 rounded-xl border border-sky-800/50">
+                <Clock className="w-8 h-8" />
               </div>
               <div className="text-left leading-none">
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block mb-1">Duty Time</span>
-                <span className="text-xl font-black text-white font-mono block uppercase">{dutyTimeStr}</span>
+                <span className="text-sm font-bold text-slate-400 uppercase tracking-widest block mb-1.5">Duty Time</span>
+                <span className="text-3xl font-black text-white font-mono block uppercase">{dutyTimeStr}</span>
               </div>
             </div>
           </div>
@@ -397,17 +397,17 @@ export default function OperatorTerminal({
             {status === 'Running' ? (
               <button
                 onClick={() => onStopMachine(selectedId)}
-                className="w-full bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white font-black text-2xl tracking-widest uppercase py-5 rounded-3xl border-2 border-rose-400/30 shadow-2xl shadow-rose-950/60 flex items-center justify-center gap-4 transition-all active:scale-[0.98] cursor-pointer animate-in fade-in"
+                className="w-full bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white font-black text-4xl tracking-widest uppercase py-8 rounded-3xl border-4 border-rose-400/40 shadow-2xl shadow-rose-950/60 flex items-center justify-center gap-5 transition-all active:scale-[0.98] cursor-pointer animate-in fade-in"
               >
-                <Ban className="w-8 h-8 shrink-0" /> STOP PRODUCTION
+                <Ban className="w-12 h-12 shrink-0" /> STOP PRODUCTION
               </button>
             ) : (
               <button
                 onClick={handleStartClick}
                 disabled={status === 'No Signal'}
-                className="w-full bg-gradient-to-r from-emerald-500 to-emerald-700 hover:from-emerald-400 hover:to-emerald-600 disabled:opacity-50 text-white font-black text-2xl tracking-widest uppercase py-5 rounded-3xl border-2 border-emerald-300/30 shadow-2xl shadow-emerald-950/60 flex items-center justify-center gap-4 transition-all active:scale-[0.98] cursor-pointer animate-in fade-in"
+                className="w-full bg-gradient-to-r from-emerald-500 to-emerald-700 hover:from-emerald-400 hover:to-emerald-600 disabled:opacity-50 text-white font-black text-4xl tracking-widest uppercase py-8 rounded-3xl border-4 border-emerald-300/40 shadow-2xl shadow-emerald-950/60 flex items-center justify-center gap-5 transition-all active:scale-[0.98] cursor-pointer animate-in fade-in"
               >
-                <Play className="w-8 h-8 fill-white text-white shrink-0" /> RESUME PRODUCTION
+                <Play className="w-12 h-12 fill-white text-white shrink-0" /> RESUME PRODUCTION
               </button>
             )}
           </div>
