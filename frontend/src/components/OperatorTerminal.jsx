@@ -269,7 +269,7 @@ export default function OperatorTerminal({
           <div className="grid grid-cols-12 gap-3 flex-1 my-1.5 min-h-0 overflow-hidden items-stretch relative z-10">
 
             {/* Left Card: Production */}
-            <div className="col-span-5 bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-2xl shadow-black/40">
+            <div className="col-span-6 bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-2xl shadow-black/40">
               <div className="bg-gradient-to-r from-sky-950 to-slate-900 border-b-2 border-sky-900/40 py-3 text-center shrink-0">
                 <span className="text-base font-black tracking-widest text-sky-300 uppercase">Production</span>
               </div>
@@ -304,29 +304,29 @@ export default function OperatorTerminal({
               </div>
             </div>
 
-            {/* Right Side: full-height row of 3 secondary stat cards */}
-            <div className="col-span-7 grid grid-cols-3 gap-4 h-full min-h-0">
+            {/* Right Side: 2x2 grid of secondary stat cards */}
+            <div className="col-span-6 grid grid-cols-2 grid-rows-2 gap-3 h-full min-h-0">
 
               {/* 1. Machine Status */}
               <div className="bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-xl shadow-black/40">
                 <div className={`bg-gradient-to-r ${statusTheme.grad} to-slate-900 border-b-2 ${statusTheme.border} py-2 text-center shrink-0`}>
-                  <span className="text-xs font-black tracking-widest text-slate-200 uppercase">Status</span>
+                  <span className="text-xs font-black tracking-widest text-slate-200 uppercase">Machine Status</span>
                 </div>
-                <div className="flex-1 flex flex-col items-center justify-center p-2 text-center gap-3 min-h-0">
+                <div className="flex-1 flex flex-col items-center justify-center p-2 text-center gap-2 min-h-0">
                   {status === 'Running' ? (
-                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center text-white shadow-xl shadow-emerald-900/60 shrink-0">
-                      <Play className="w-11 h-11 fill-white text-white translate-x-0.5" />
+                    <div className="w-14 h-14 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center text-white shadow-xl shadow-emerald-900/60 shrink-0">
+                      <Play className="w-7 h-7 fill-white text-white translate-x-0.5" />
                     </div>
                   ) : status === 'Stopped' ? (
-                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 flex items-center justify-center text-white shadow-xl shadow-rose-900/60 shrink-0">
-                      <Ban className="w-11 h-11 text-white" />
+                    <div className="w-14 h-14 rounded-full bg-gradient-to-br from-rose-500 to-rose-700 flex items-center justify-center text-white shadow-xl shadow-rose-900/60 shrink-0">
+                      <Ban className="w-7 h-7 text-white" />
                     </div>
                   ) : (
-                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-violet-500 to-violet-700 flex items-center justify-center text-white shadow-xl shadow-violet-900/60 shrink-0">
-                      <AlertTriangle className="w-11 h-11 text-white" />
+                    <div className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-500 to-violet-700 flex items-center justify-center text-white shadow-xl shadow-violet-900/60 shrink-0">
+                      <AlertTriangle className="w-7 h-7 text-white" />
                     </div>
                   )}
-                  <span className={`text-2xl font-black uppercase tracking-wide leading-none ${statusTheme.text}`}>
+                  <span className={`text-lg font-black uppercase tracking-wide leading-none ${statusTheme.text}`}>
                     {status}
                   </span>
                 </div>
@@ -338,11 +338,11 @@ export default function OperatorTerminal({
                   <span className="text-xs font-black tracking-widest text-sky-300 uppercase">Active Cycle</span>
                 </div>
                 <div className="flex-1 flex flex-col items-center justify-center p-1 text-center gap-1.5 min-h-0">
-                  <Clock className="w-10 h-10 text-sky-400 animate-pulse shrink-0" />
-                  <span className="text-6xl font-black font-mono text-slate-100 leading-none">
+                  <Clock className="w-7 h-7 text-sky-400 animate-pulse shrink-0" />
+                  <span className="text-4xl font-black font-mono text-slate-100 leading-none">
                     {status === 'Running' ? `${cycleTimer.toFixed(1)}s` : '0.0s'}
                   </span>
-                  <span className="text-base font-bold text-slate-400 uppercase leading-none">Ideal: {ideal_cycle_time}s</span>
+                  <span className="text-xs font-bold text-slate-400 uppercase leading-none">Ideal: {ideal_cycle_time}s</span>
                 </div>
               </div>
 
@@ -352,43 +352,37 @@ export default function OperatorTerminal({
                   <span className="text-xs font-black tracking-widest text-sky-300 uppercase">Last Cycle</span>
                 </div>
                 <div className="flex-1 flex flex-col items-center justify-center p-1 text-center gap-1.5 min-h-0">
-                  <Clock className="w-10 h-10 text-sky-400 shrink-0" />
-                  <span className="text-6xl font-black font-mono text-slate-100 leading-none">
+                  <Clock className="w-7 h-7 text-sky-400 shrink-0" />
+                  <span className="text-4xl font-black font-mono text-slate-100 leading-none">
                     {lastCycleTime > 0 ? `${lastCycleTime.toFixed(2)}s` : '10.88s'}
                   </span>
                   {lastCycleTime > 0 ? (
-                    <span className={`text-base font-black uppercase leading-none ${lastCycleTime <= ideal_cycle_time ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    <span className={`text-xs font-black uppercase leading-none ${lastCycleTime <= ideal_cycle_time ? 'text-emerald-400' : 'text-amber-400'}`}>
                       Perf: {(ideal_cycle_time / lastCycleTime * 100).toFixed(0)}%
                     </span>
                   ) : (
-                    <span className="text-base font-bold text-emerald-400 uppercase leading-none">Perf: 110%</span>
+                    <span className="text-xs font-bold text-emerald-400 uppercase leading-none">Perf: 110%</span>
                   )}
                 </div>
               </div>
 
-            </div>
-          </div>
+              {/* 4. Shift & Duty */}
+              <div className="bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-xl shadow-black/40">
+                <div className="bg-gradient-to-r from-violet-950 to-slate-900 border-b-2 border-violet-900/40 py-2 text-center shrink-0">
+                  <span className="text-xs font-black tracking-widest text-violet-300 uppercase">Shift &amp; Duty</span>
+                </div>
+                <div className="flex-1 flex flex-col items-center justify-center gap-2 min-h-0 divide-y divide-slate-800 px-3">
+                  <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
+                    <Calendar className="w-5 h-5 text-violet-400 shrink-0" />
+                    <span className="text-lg font-black text-white font-mono uppercase leading-none">{currentShift}</span>
+                  </div>
+                  <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
+                    <Clock className="w-5 h-5 text-sky-400 shrink-0" />
+                    <span className="text-lg font-black text-white font-mono uppercase leading-none">{dutyTimeStr}</span>
+                  </div>
+                </div>
+              </div>
 
-          {/* Shift & Duty Strip */}
-          <div className="w-full bg-gradient-to-r from-slate-900 via-violet-950/40 to-slate-900 border-2 border-slate-800 rounded-2xl px-6 py-3 flex items-center justify-around shrink-0 shadow-lg shadow-black/30 relative z-10">
-            <div className="flex items-center gap-4">
-              <div className="p-2.5 bg-violet-900/40 text-violet-400 rounded-xl border border-violet-800/50">
-                <Calendar className="w-8 h-8" />
-              </div>
-              <div className="text-left leading-none">
-                <span className="text-sm font-bold text-slate-400 uppercase tracking-widest block mb-1.5">Current Shift</span>
-                <span className="text-3xl font-black text-white font-mono block uppercase">{currentShift}</span>
-              </div>
-            </div>
-            <div className="w-px h-12 bg-slate-800"></div>
-            <div className="flex items-center gap-4">
-              <div className="p-2.5 bg-sky-900/40 text-sky-400 rounded-xl border border-sky-800/50">
-                <Clock className="w-8 h-8" />
-              </div>
-              <div className="text-left leading-none">
-                <span className="text-sm font-bold text-slate-400 uppercase tracking-widest block mb-1.5">Duty Time</span>
-                <span className="text-3xl font-black text-white font-mono block uppercase">{dutyTimeStr}</span>
-              </div>
             </div>
           </div>
 
