@@ -412,23 +412,25 @@ function AppShell() {
     // are stable enough in practice and including them would reconnect the socket every render.
   }, [authToken]);
 
-  // Fallback Polling: if WebSocket connection fails or is blocked, periodically fetch machines telemetry
+  // Reconciliation polling: runs regardless of WebSocket health, not just as a disconnect
+  // fallback. This backend and the cloud dashboard's backend are separate processes that only
+  // share the database, not a WebSocket - so a change made from the cloud (e.g. a shift plan
+  // edit) is written to the DB but never pushed to this machine's socket. Without this poll,
+  // this screen would only pick it up on next reload.
   useEffect(() => {
     if (!authToken || !initialLoadComplete) return undefined;
 
     const intervalTime = isKioskMode ? 1500 : 4000;
 
     const pollInterval = setInterval(() => {
-      if (!socketConnected) {
-        (async () => {
-          try {
-            const machinesList = await apiFetch('/api/machines', { token: authToken });
-            setMachines(machinesList);
-          } catch (err) {
-            console.error('Fallback polling failed:', err.message);
-          }
-        })();
-      }
+      (async () => {
+        try {
+          const machinesList = await apiFetch('/api/machines', { token: authToken });
+          setMachines(machinesList);
+        } catch (err) {
+          console.error('Reconciliation polling failed:', err.message);
+        }
+      })();
     }, intervalTime);
 
     return () => clearInterval(pollInterval);
