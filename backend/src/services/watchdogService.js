@@ -81,19 +81,29 @@ export function startWatchdogService(broadcast) {
     }
 
     try {
-      // Find all machines that are currently marked as Running
-      const [machines] = await db.query('SELECT * FROM machines WHERE status = "Running"');
+      // Find all machines that are currently marked as Running, along with when the
+      // current Running period actually started (the open status_logs row).
+      const [machines] = await db.query(`
+        SELECT m.*, sl.start_time AS running_since
+        FROM machines m
+        LEFT JOIN status_logs sl ON sl.machine_id = m.id AND sl.end_time IS NULL
+        WHERE m.status = 'Running'
+      `);
       const now = new Date();
 
       for (const machine of machines) {
-        // Skip machines that have never sent a pulse
-        if (!machine.last_pulse) continue;
+        // Skip machines that have never sent a pulse and have no open Running log yet
+        if (!machine.last_pulse && !machine.running_since) continue;
 
-        const lastPulseTime = new Date(machine.last_pulse);
-        const secondsSinceLastPulse = (now.getTime() - lastPulseTime.getTime()) / 1000;
+        // Use whichever is more recent: a stale last_pulse from before a stop/resume
+        // must not count the downtime gap against the machine the moment it resumes.
+        const lastPulseTime = machine.last_pulse ? new Date(machine.last_pulse).getTime() : 0;
+        const runningSinceTime = machine.running_since ? new Date(machine.running_since).getTime() : 0;
+        const baseTime = Math.max(lastPulseTime, runningSinceTime);
+        const secondsSinceLastPulse = (now.getTime() - baseTime) / 1000;
 
-        // Threshold is 5x ideal cycle time, or a minimum of 2 minutes (120 seconds)
-        const threshold = Math.max(machine.ideal_cycle_time * 5, 120);
+        // Threshold is the ideal cycle time plus a 2 minute (120 second) grace period
+        const threshold = machine.ideal_cycle_time + 120;
 
         if (secondsSinceLastPulse > threshold) {
           logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Stopped.`);

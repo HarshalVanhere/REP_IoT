@@ -86,11 +86,24 @@ export default function OperatorTerminal({
     }
   }, [sessionUser]);
 
+  // Tracks when this Running period actually started, so a stale last_pulse from
+  // before a stop/resume can't make the stopwatch open by counting the downtime gap.
+  const [runningSince, setRunningSince] = useState(null);
+  const prevStatusRef = React.useRef(status);
+
+  useEffect(() => {
+    if (status === 'Running' && prevStatusRef.current !== 'Running') {
+      setRunningSince(Date.now());
+    }
+    prevStatusRef.current = status;
+  }, [status]);
+
   // Real-time stopwatch
   useEffect(() => {
     let intervalId;
     if (status === 'Running') {
-      const baseTime = last_pulse ? new Date(last_pulse).getTime() : Date.now();
+      const lastPulseTime = last_pulse ? new Date(last_pulse).getTime() : 0;
+      const baseTime = Math.max(lastPulseTime, runningSince ?? Date.now());
       const updateTimer = () => {
         const elapsed = (Date.now() - baseTime) / 1000;
         setCycleTimer(Math.max(0, elapsed));
@@ -103,7 +116,7 @@ export default function OperatorTerminal({
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [status, last_pulse]);
+  }, [status, last_pulse, runningSince]);
 
   const handleLoginSubmit = (e) => {
     e.preventDefault();
