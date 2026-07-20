@@ -295,6 +295,30 @@ router.setBroadcastCallback = (cb) => {
 };
 
 /**
+ * Edge Gateway pulls its own machine's live planning config (target, ideal cycle time,
+ * part, operator) down from the cloud DB. This is the missing downward counterpart to
+ * POST /sync/data below - that route only ever uploads pulses/status logs, so without this,
+ * a shift plan edited on the cloud dashboard updates the cloud's copy of the machine row but
+ * never reaches the gateway's own local DB (they only talk to each other through this sync
+ * loop, not a shared database).
+ */
+router.get('/sync/machine-config/:machineId', requireSyncKey, async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT id, target, ideal_cycle_time, active_part_name, assigned_operator FROM machines WHERE id = ?',
+      [req.params.machineId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Machine not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    logger.error(`API Error: GET /sync/machine-config/${req.params.machineId}:`, err.message);
+    res.status(500).json({ error: 'Failed to fetch machine config' });
+  }
+});
+
+/**
  * Receive batch synchronization data from Edge Gateways.
  * Authenticated via a shared SYNC_API_KEY header (machine-to-machine), not a user session.
  */

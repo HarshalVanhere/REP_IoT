@@ -3,6 +3,7 @@ import http from 'http';
 import https from 'https';
 import { URL } from 'url';
 import { logger } from '../utils/logger.js';
+import { handleStatusMessage } from './mqttService.js';
 
 let syncIntervalId = null;
 let isSyncing = false; // Prevent overlapping runs
@@ -91,10 +92,67 @@ export function startSyncService() {
     } catch (err) {
       // Log errors quietly to avoid bloating console in offline mode
       logger.warn(`🔄 Sync offline: Cloud unavailable (${err.message})`);
+    }
+
+    try {
+      await pullMachineConfig(cloudUrl);
+    } catch (err) {
+      logger.warn(`🔄 Sync: Failed to pull machine config (${err.message})`);
     } finally {
       isSyncing = false;
     }
   }, 5000);
+}
+
+/**
+ * Pulls this gateway's own machine row (target, cycle time, part, operator) down from the
+ * cloud and applies it to the local DB, then re-broadcasts locally so the operator terminal
+ * picks it up - the counterpart to synchronizeData()'s upload above.
+ */
+async function pullMachineConfig(cloudUrl) {
+  const machineId = process.env.GATEWAY_MACHINE_ID;
+  if (!machineId) return;
+
+  const headers = {};
+  if (process.env.SYNC_API_KEY) {
+    headers['x-sync-key'] = process.env.SYNC_API_KEY;
+  }
+
+  const endpoint = `${cloudUrl.replace(/\/$/, '')}/api/sync/machine-config/${machineId}`;
+  const res = await request(endpoint, { method: 'GET', headers });
+  if (!res.ok) {
+    if (res.status !== 404) {
+      logger.warn(`🔄 Sync: Failed to pull machine config (HTTP ${res.status})`);
+    }
+    return;
+  }
+
+  const remote = await res.json();
+  const [localRows] = await db.query(
+    'SELECT status, target, ideal_cycle_time, active_part_name, assigned_operator FROM machines WHERE id = ?',
+    [machineId]
+  );
+  if (localRows.length === 0) return;
+  const local = localRows[0];
+
+  const remotePart = remote.active_part_name || 'Unassigned';
+  const remoteOperator = remote.assigned_operator || 'Unassigned';
+  const differs = remote.target !== local.target
+    || remote.ideal_cycle_time !== local.ideal_cycle_time
+    || remotePart !== local.active_part_name
+    || remoteOperator !== local.assigned_operator;
+
+  if (!differs) return;
+
+  await db.query(
+    'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ? WHERE id = ?',
+    [remote.target, remote.ideal_cycle_time, remotePart, remoteOperator, machineId]
+  );
+  logger.info(`🔄 Sync: Pulled updated plan for machine ${machineId} from cloud (target=${remote.target}, cycle=${remote.ideal_cycle_time}s)`);
+
+  // Recompute OEE and broadcast the change to this gateway's own locally-connected clients
+  // (the operator terminal), mirroring shiftPlans.js's applyPlanToMachine on the cloud side.
+  await handleStatusMessage(machineId, local.status);
 }
 
 /**
