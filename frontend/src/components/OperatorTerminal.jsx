@@ -273,8 +273,8 @@ export default function OperatorTerminal({
               <div className="bg-gradient-to-r from-sky-950 to-slate-900 border-b-2 border-sky-900/40 py-3 text-center shrink-0">
                 <span className="text-base font-black tracking-widest text-sky-300 uppercase">Production</span>
               </div>
-              <div className="flex-1 flex flex-col items-center justify-center p-1 min-h-0">
-                <div className="relative flex items-center justify-center shrink min-h-0 w-60 h-60">
+              <div className="flex-1 flex items-center justify-center p-8 min-h-0">
+                <div className="relative flex items-center justify-center aspect-square h-full max-w-full max-h-full">
                   <div className="absolute w-[75%] h-[75%] rounded-full bg-sky-500/10 blur-2xl" />
                   <svg className="w-full h-full transform -rotate-90" viewBox="0 0 160 160">
                     <circle
@@ -282,23 +282,23 @@ export default function OperatorTerminal({
                       cy="80"
                       r="64"
                       className="stroke-slate-800 fill-none"
-                      strokeWidth="14"
+                      strokeWidth="10"
                     />
                     <circle
                       cx="80"
                       cy="80"
                       r="64"
                       className="stroke-sky-500 fill-none transition-all duration-500 ease-out"
-                      strokeWidth="14"
+                      strokeWidth="10"
                       strokeDasharray={2 * Math.PI * 64}
                       strokeDashoffset={2 * Math.PI * 64 - (Math.min(100, achievementRate) / 100) * (2 * Math.PI * 64)}
                       strokeLinecap="round"
                     />
                   </svg>
                   <div className="absolute flex flex-col items-center justify-center">
-                    <span className="text-7xl font-black text-slate-100 font-mono leading-none">{production_count}</span>
-                    <span className="text-slate-400 font-extrabold text-base tracking-wide uppercase mt-2">/ {target} Parts</span>
-                    <span className="text-2xl font-black text-sky-400 mt-1.5 uppercase tracking-wide">{achievementRate.toFixed(0)}% Done</span>
+                    <span className="text-9xl font-black text-slate-100 font-mono leading-none">{production_count}</span>
+                    <span className="text-slate-400 font-extrabold text-xl tracking-wide uppercase mt-3">/ {target} Parts</span>
+                    <span className="text-4xl font-black text-sky-400 mt-2.5 uppercase tracking-wide">{achievementRate.toFixed(0)}% Done</span>
                   </div>
                 </div>
               </div>
