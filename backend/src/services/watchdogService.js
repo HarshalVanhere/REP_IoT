@@ -4,7 +4,7 @@ import { sendSerialCommand } from './serialService.js';
 import { resetProductionCounters } from './productionRecordService.js';
 import { activateScheduleEntry } from './partScheduleService.js';
 import { logger } from '../utils/logger.js';
-import { getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
+import { getShiftForTimestamp, toDateOnlyString, buildPlantDateTime } from '../config/shifts.js';
 
 // Per-machine last-seen shift, so an actual shift boundary crossing (vs. just a same-shift
 // plan value edit) can be told apart and trigger a counter reset exactly once.
@@ -14,15 +14,36 @@ const lastSeenShift = new Map();
 // a machine has run through its whole scheduled part list).
 const exhaustedLogged = new Set();
 
+// Per-machine, once-per-block log guard (avoids spamming the log every 10s while a machine
+// sits blocked with no schedule for the current shift).
+const noScheduleLogged = new Set();
+
 /**
- * Builds a local-time Date from a 'YYYY-MM-DD' date string and a 'HH:MM:SS' time string,
- * matching the local-constructor pattern config/shifts.js already uses to avoid UTC-parsing
- * ambiguity with bare ISO strings.
+ * Enforces "no production without a valid schedule": clears whatever part/operator was
+ * carried over (never lets a machine silently keep running - or resume - the previous shift's
+ * or previous schedule's part) and force-stops the machine if it's currently Running. A
+ * machine in this state stays blocked until the PPC Engineer creates and activates a real
+ * schedule entry for the current machine/shift - nothing here can revive it automatically.
  */
-function buildLocalDateTime(dateStr, timeStr) {
-  const [year, month, day] = dateStr.split('-').map(Number);
-  const [hh, mm, ss] = timeStr.split(':').map(Number);
-  return new Date(year, month - 1, day, hh, mm, ss || 0);
+async function blockMachineWithoutSchedule(machine) {
+  await db.query(
+    'UPDATE machines SET active_part_name = NULL, assigned_operator = NULL, active_schedule_id = NULL WHERE id = ?',
+    [machine.id]
+  );
+
+  if (machine.status === 'Running') {
+    try {
+      await sendSerialCommand(machine.id, 'stop');
+    } catch (serialErr) {
+      logger.warn(`Watchdog: Failed to send interlock stop command while blocking machine ${machine.id}: ${serialErr.message}`);
+    }
+    await handleStatusMessage(machine.id, 'Stopped');
+  }
+
+  if (!noScheduleLogged.has(machine.id)) {
+    logger.info(`⏰ Watchdog: Machine ${machine.id} has no scheduled part for the current shift - blocking production until PPC creates a schedule.`);
+    noScheduleLogged.add(machine.id);
+  }
 }
 
 /**
@@ -53,16 +74,30 @@ async function applyScheduledParts() {
       ?? (machine.segment_start ? getShiftForTimestamp(machine.segment_start) : currentShift);
     if (previousShift !== currentShift) {
       await resetProductionCounters(machine.id, 'shift_change');
-      await db.query('UPDATE machines SET active_schedule_id = NULL WHERE id = ?', [machine.id]);
+      // Never carry the previous shift's part/operator into a new shift - a new shift starts
+      // with nothing active until a schedule (for THIS shift) says otherwise. If one exists
+      // below, it gets activated moments later in this same tick; if not, the machine stays
+      // blocked exactly as blockMachineWithoutSchedule would leave it anyway.
+      await db.query('UPDATE machines SET active_schedule_id = NULL, active_part_name = NULL, assigned_operator = NULL WHERE id = ?', [machine.id]);
       machine.active_schedule_id = null;
+      machine.active_part_name = null;
+      machine.assigned_operator = null;
       machine.production_count = 0;
       exhaustedLogged.delete(machine.id);
+      noScheduleLogged.delete(machine.id);
       logger.info(`⏰ Watchdog: Shift boundary crossed for machine ${machine.id} (${previousShift} -> ${currentShift}), production counters reset.`);
     }
     lastSeenShift.set(machine.id, currentShift);
 
     const machineEntries = todaysEntries.filter((e) => e.machine_id === machine.id);
-    if (machineEntries.length === 0) continue; // no schedule for this machine/shift - legacy/manual mode
+    if (machineEntries.length === 0) {
+      // No schedule at all for this machine's current shift - production must not run.
+      if (machine.active_schedule_id !== null || machine.active_part_name !== null) {
+        await blockMachineWithoutSchedule(machine);
+      }
+      continue;
+    }
+    noScheduleLogged.delete(machine.id);
 
     const activeEntries = machineEntries.filter((e) => e.status !== 'Completed' && e.status !== 'Skipped');
     const currentEntry = machineEntries.find((e) => e.id === machine.active_schedule_id) || null;
@@ -72,7 +107,7 @@ async function applyScheduledParts() {
 
     if (currentEntry) {
       const targetReached = machine.production_count >= currentEntry.target;
-      const endTimeReached = now >= buildLocalDateTime(today, currentEntry.planned_end);
+      const endTimeReached = now >= buildPlantDateTime(today, currentEntry.planned_end);
 
       if (targetReached || endTimeReached) {
         nextEntry = activeEntries.find((e) => e.sequence > currentEntry.sequence) || null;
@@ -85,7 +120,7 @@ async function applyScheduledParts() {
       }
     } else {
       // Nothing active yet this shift - activate the first pending entry whose window has opened.
-      nextEntry = activeEntries.find((e) => e.status === 'Pending' && buildLocalDateTime(today, e.planned_start) <= now) || null;
+      nextEntry = activeEntries.find((e) => e.status === 'Pending' && buildPlantDateTime(today, e.planned_start) <= now) || null;
       trigger = 'auto_start';
     }
 

@@ -126,6 +126,18 @@ router.post('/machines/:id/resume', requireAuth, requireRole('Operator', 'Superv
   }
 
   try {
+    // Production must never start without a valid, currently-active part schedule - never
+    // fall back to whatever part happened to be active before. See watchdogService.js's
+    // blockMachineWithoutSchedule() for the counterpart that clears this when a shift/schedule
+    // ends without a replacement.
+    const [machineRows] = await db.query('SELECT active_schedule_id FROM machines WHERE id = ?', [machineId]);
+    if (machineRows.length === 0) {
+      return res.status(404).json({ error: 'Machine not found' });
+    }
+    if (!machineRows[0].active_schedule_id) {
+      return res.status(400).json({ error: 'No part is scheduled. Please schedule the part first from the PPC Engineer login.' });
+    }
+
     // 1. Trigger physical machine run enablement and wait for ESP32 confirmation
     await sendSerialCommand(machineId, 'resume');
 

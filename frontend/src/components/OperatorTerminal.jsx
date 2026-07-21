@@ -70,9 +70,12 @@ export default function OperatorTerminal({
 
   // Find active selected machine
   const machine = machines.find(m => m.id === selectedId) || {};
-  const { name = '1313 ACE CNC SUPER JOBBER', status = 'No Signal', target = 500, production_count = 0, last_pulse, ideal_cycle_time = 12, metrics, assigned_operator, active_part_name } = machine;
+  const { name = '1313 ACE CNC SUPER JOBBER', status = 'No Signal', target = 500, production_count = 0, last_pulse, ideal_cycle_time = 12, metrics, assigned_operator, active_part_name, active_schedule_id } = machine;
   const { lastCycleTime = 0, currentShift = 'Shift A' } = metrics || {};
   const achievementRate = target > 0 ? (production_count / target) * 100 : 0;
+  // No part scheduled for this machine right now - production must never start (or continue
+  // showing a stale previous part) without PPC creating and activating a real schedule entry.
+  const hasSchedule = Boolean(active_schedule_id);
 
   useEffect(() => {
     setShowManualLogin(false);
@@ -407,6 +410,17 @@ export default function OperatorTerminal({
             </div>
           </div>
 
+          {/* No-schedule block: production must never start (or silently keep a stale
+              previous part) without PPC creating and activating a real schedule entry. */}
+          {!hasSchedule && status !== 'Running' && (
+            <div className="w-full mb-2 shrink-0 bg-gradient-to-r from-amber-950/70 to-slate-900 border-2 border-amber-800/60 rounded-2xl px-5 py-3.5 flex items-center gap-3 relative z-10 animate-in fade-in">
+              <AlertTriangle className="w-7 h-7 text-amber-400 shrink-0" />
+              <span className="text-sm font-black uppercase tracking-wide text-amber-300 leading-snug">
+                No part is scheduled. Please schedule the part first from the PPC Engineer login.
+              </span>
+            </div>
+          )}
+
           {/* Touch Control Buttons */}
           <div className="w-full pt-2 shrink-0 relative z-10">
             {status === 'Running' ? (
@@ -419,7 +433,8 @@ export default function OperatorTerminal({
             ) : (
               <button
                 onClick={handleStartClick}
-                disabled={status === 'No Signal'}
+                disabled={status === 'No Signal' || !hasSchedule}
+                title={!hasSchedule ? 'No part is scheduled. Please schedule the part first from the PPC Engineer login.' : undefined}
                 className="w-full bg-gradient-to-r from-emerald-500 to-emerald-700 hover:from-emerald-400 hover:to-emerald-600 disabled:opacity-50 text-white font-black text-4xl tracking-widest uppercase py-8 rounded-3xl border-4 border-emerald-300/40 shadow-2xl shadow-emerald-950/60 flex items-center justify-center gap-5 transition-all active:scale-[0.98] cursor-pointer animate-in fade-in"
               >
                 <Play className="w-12 h-12 fill-white text-white shrink-0" /> RESUME PRODUCTION

@@ -194,6 +194,11 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
   const [editableDate, setEditableDate] = useState(true);
   const [loading, setLoading] = useState(false);
   const [activeShiftTab, setActiveShiftTab] = useState({}); // machineId -> shift name
+  // Backend-computed (plant-timezone-aware) - which shift is actually live right now, so the
+  // board defaults to showing that instead of always opening on "Shift A" regardless of the
+  // real time of day, which is what made a just-created current-shift entry look like it
+  // belonged to the wrong shift when activation was attempted.
+  const liveCurrentShift = machines.find((m) => m.metrics?.currentShift)?.metrics?.currentShift || 'Shift A';
 
   const [entryModal, setEntryModal] = useState(null); // { mode, machineId, machineName, shift, entry }
   const [entryForm, setEntryForm] = useState({ part_name: '', target: 0, ideal_cycle_time: 0, operator: '', planned_start: '', planned_end: '' });
@@ -464,7 +469,7 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
                 return acc;
               }, {})
             ).map((machine) => {
-              const currentTab = activeShiftTab[machine.machineId] || 'Shift A';
+              const currentTab = activeShiftTab[machine.machineId] || liveCurrentShift;
               const activeRow = machine.byShift[currentTab];
               return (
                 <div key={machine.machineId} className="border border-[var(--grey-200)] rounded-2xl p-4">
@@ -478,10 +483,13 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
                         <button
                           key={shift}
                           onClick={() => setActiveShiftTab((prev) => ({ ...prev, [machine.machineId]: shift }))}
-                          className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition ${
+                          className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition flex items-center gap-1 ${
                             currentTab === shift ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                           }`}
                         >
+                          {shift === liveCurrentShift && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" title="Live shift right now" />
+                          )}
                           {shift}
                         </button>
                       ))}

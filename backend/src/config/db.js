@@ -645,6 +645,17 @@ async function mockQuery(sql, params = []) {
         machine.assigned_operator = operator;
         affectedRows = 1;
       }
+    } else if (sqlLower.includes('active_part_name = null')) {
+      // Blocking a machine with no active schedule - clears part/operator/active_schedule_id
+      // together, regardless of which order they appear in the SQL text.
+      const machineId = params[0];
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.active_schedule_id = null;
+        machine.active_part_name = null;
+        machine.assigned_operator = null;
+        affectedRows = 1;
+      }
     } else if (sqlLower.includes('set active_schedule_id = null')) {
       const machineId = params[0];
       const machine = mockDb.machines.find(m => m.id === machineId);
