@@ -50,18 +50,12 @@ void parseCommand(const char* line) {
     
     // Emit command acknowledgement
     Serial.println("{\"type\":\"ack\",\"command\":\"resume\",\"status\":\"success\"}");
-    
-    // Force immediate status update
-    sendCurrentStatus();
   } else if (strstr(line, "\"command\":\"stop\"") != NULL) {
     digitalWrite(PIN_RUN_ENABLE, LOW);
     Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay de-energized (Run Locked)\"}");
     
     // Emit command acknowledgement
     Serial.println("{\"type\":\"ack\",\"command\":\"stop\",\"status\":\"success\"}");
-    
-    // Force immediate status update
-    sendCurrentStatus();
   }
 }
 

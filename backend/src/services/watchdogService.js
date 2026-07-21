@@ -173,7 +173,7 @@ export function startWatchdogService(broadcast) {
       const [machines] = await db.query(`
         SELECT m.*, sl.start_time AS running_since
         FROM machines m
-        LEFT JOIN status_logs sl ON sl.machine_id = m.id AND sl.end_time IS NULL
+        LEFT JOIN status_logs sl ON sl.machine_id = m.id AND sl.end_time IS NULL AND sl.status = 'Running'
         WHERE m.status = 'Running'
       `);
       const now = new Date();
