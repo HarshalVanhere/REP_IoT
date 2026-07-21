@@ -144,7 +144,12 @@ async function pullMachineConfig(cloudUrl) {
   const localResetAt = local.last_manual_reset_at ? new Date(local.last_manual_reset_at).getTime() : 0;
   if (remoteResetAt > localResetAt) {
     await resetProductionCounters(machineId, 'manual_reset', null, { changeTrigger: 'cloud_sync' });
-    await db.query('UPDATE machines SET last_manual_reset_at = ? WHERE id = ?', [remote.last_manual_reset_at, machineId]);
+    // remote.last_manual_reset_at arrives as a JSON-serialized ISO string (e.g.
+    // '2026-07-21T04:57:57.000Z') - mysql2 passes raw strings through as literal SQL text
+    // rather than reformatting them, and MySQL's strict mode rejects the 'T'/'Z' ISO format
+    // for a DATETIME/TIMESTAMP column. Wrapping in `new Date()` lets mysql2 serialize it
+    // properly, the same way it already does for every other Date value in this codebase.
+    await db.query('UPDATE machines SET last_manual_reset_at = ? WHERE id = ?', [new Date(remote.last_manual_reset_at), machineId]);
     logger.info(`🔄 Sync: Mirrored a cloud-triggered manual reset for machine ${machineId}`);
   }
 
