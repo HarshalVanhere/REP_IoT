@@ -130,11 +130,23 @@ async function pullMachineConfig(cloudUrl) {
 
   const remote = await res.json();
   const [localRows] = await db.query(
-    'SELECT status, target, ideal_cycle_time, active_part_name, assigned_operator, active_schedule_id FROM machines WHERE id = ?',
+    'SELECT status, target, ideal_cycle_time, active_part_name, assigned_operator, active_schedule_id, last_manual_reset_at FROM machines WHERE id = ?',
     [machineId]
   );
   if (localRows.length === 0) return;
   const local = localRows[0];
+
+  // A manual reset triggered from the cloud dashboard only ever touches the cloud's own
+  // mirror of the count - this gateway is what actually increments production_count live off
+  // real pulses, so the reset has to be explicitly mirrored down here rather than picked up
+  // via the target/part/operator diff below.
+  const remoteResetAt = remote.last_manual_reset_at ? new Date(remote.last_manual_reset_at).getTime() : 0;
+  const localResetAt = local.last_manual_reset_at ? new Date(local.last_manual_reset_at).getTime() : 0;
+  if (remoteResetAt > localResetAt) {
+    await resetProductionCounters(machineId, 'manual_reset', null, { changeTrigger: 'cloud_sync' });
+    await db.query('UPDATE machines SET last_manual_reset_at = ? WHERE id = ?', [remote.last_manual_reset_at, machineId]);
+    logger.info(`🔄 Sync: Mirrored a cloud-triggered manual reset for machine ${machineId}`);
+  }
 
   const remotePart = remote.active_part_name || 'Unassigned';
   const remoteOperator = remote.assigned_operator || 'Unassigned';

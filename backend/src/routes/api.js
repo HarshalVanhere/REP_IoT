@@ -84,6 +84,10 @@ router.post('/machines/:id/reset-count', requireAuth, requireRole('Supervisor', 
   const machineId = req.params.id;
   try {
     await resetProductionCounters(machineId, 'manual_reset', req.user.loginId);
+    // Stamped so the edge gateway's sync loop can tell a reset happened and mirror it onto
+    // its own local counters - without this, a cloud-triggered reset only ever affects the
+    // cloud's mirror of the count, since the gateway is what actually increments it live.
+    await db.query('UPDATE machines SET last_manual_reset_at = NOW() WHERE id = ?', [machineId]);
     await recordAuditLog(req.user.loginId, 'MACHINE_COUNT_RESET', machineId);
     res.json({ success: true, message: `Production counters reset for machine ${machineId}` });
   } catch (err) {
@@ -414,7 +418,7 @@ router.setBroadcastCallback = (cb) => {
 router.get('/sync/machine-config/:machineId', requireSyncKey, async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, target, ideal_cycle_time, active_part_name, assigned_operator, active_schedule_id FROM machines WHERE id = ?',
+      'SELECT id, target, ideal_cycle_time, active_part_name, assigned_operator, active_schedule_id, last_manual_reset_at FROM machines WHERE id = ?',
       [req.params.machineId]
     );
     if (rows.length === 0) {

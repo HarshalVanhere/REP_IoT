@@ -171,6 +171,70 @@ async function setup() {
       // Ignore if column already exists
     }
 
+    // Create part_schedules table (ordered, unlimited-length list of parts a machine runs
+    // sequentially within one shift)
+    console.log('🛠️  Creating "part_schedules" table...');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS part_schedules (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        machine_id VARCHAR(50) NOT NULL,
+        plan_date DATE NOT NULL,
+        shift VARCHAR(10) NOT NULL,
+        sequence INT NOT NULL,
+        part_name VARCHAR(100) NOT NULL,
+        target INT NOT NULL,
+        ideal_cycle_time INT NOT NULL,
+        operator VARCHAR(100) NULL,
+        planned_start TIME NOT NULL,
+        planned_end TIME NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'Pending',
+        activated_at TIMESTAMP NULL,
+        completed_at TIMESTAMP NULL,
+        created_by VARCHAR(50) NULL,
+        updated_by VARCHAR(50) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_machine_date_shift_seq (machine_id, plan_date, shift, sequence),
+        FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+      )
+    `);
+
+    try {
+      await connection.query('ALTER TABLE machines ADD COLUMN active_schedule_id INT NULL');
+      console.log('   + Added "active_schedule_id" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
+      await connection.query('ALTER TABLE machines ADD COLUMN last_manual_reset_at TIMESTAMP NULL');
+      console.log('   + Added "last_manual_reset_at" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
+      await connection.query('ALTER TABLE pulses ADD COLUMN part_schedule_id INT NULL');
+      console.log('   + Added "part_schedule_id" column to pulses table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
+    const productionRecordAuditColumns = [
+      ['schedule_id', 'INT NULL'],
+      ['previous_part_name', 'VARCHAR(100) NULL'],
+      ['next_part_name', 'VARCHAR(100) NULL'],
+      ['changed_by', 'VARCHAR(50) NULL'],
+      ['change_trigger', 'VARCHAR(30) NULL'],
+      ['change_reason', 'VARCHAR(255) NULL']
+    ];
+    for (const [column, definition] of productionRecordAuditColumns) {
+      try {
+        await connection.query(`ALTER TABLE production_records ADD COLUMN ${column} ${definition}`);
+        console.log(`   + Added "${column}" column to production_records table`);
+      } catch (err) {
+        // Ignore if column already exists
+      }
+    }
+
     // Seed default plant accounts (default password: 1234 - change before go-live)
     console.log('🌱 Seeding default user accounts...');
     const seedUsers = [

@@ -44,10 +44,14 @@ async function applyScheduledParts() {
   );
 
   for (const machine of machines) {
-    // Only reset once we've actually observed a prior shift for this machine (skips a
-    // spurious reset on process boot, when nothing has been "seen" yet).
-    const previousShift = lastSeenShift.get(machine.id);
-    if (previousShift && previousShift !== currentShift) {
+    // lastSeenShift is in-memory and empty on every (re)start. On the very first tick for a
+    // machine, fall back to the shift implied by segment_start (when its live tally last
+    // began) instead of silently adopting currentShift - this catches a boundary that was
+    // crossed while the process was down/restarting (crash, redeploy, Pi reboot) instead of
+    // missing that reset entirely until the shift after next.
+    const previousShift = lastSeenShift.get(machine.id)
+      ?? (machine.segment_start ? getShiftForTimestamp(machine.segment_start) : currentShift);
+    if (previousShift !== currentShift) {
       await resetProductionCounters(machine.id, 'shift_change');
       await db.query('UPDATE machines SET active_schedule_id = NULL WHERE id = ?', [machine.id]);
       machine.active_schedule_id = null;
