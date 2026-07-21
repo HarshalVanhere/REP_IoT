@@ -271,7 +271,7 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
  * Ensures that the active status log matches the target status.
  * Closes out any older open status log and opens a new one if status changes.
  */
-async function ensureActiveStatusLog(machineId, targetStatus, timestamp) {
+export async function ensureActiveStatusLog(machineId, targetStatus, timestamp) {
   if (timestamp) timestamp.setMilliseconds(0);
   // Check if there's already an active log with this status
   const [activeLogs] = await db.query(

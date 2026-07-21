@@ -1,5 +1,5 @@
 import db from '../config/db.js';
-import { handleStatusMessage } from './mqttService.js';
+import { handleStatusMessage, ensureActiveStatusLog } from './mqttService.js';
 import { sendSerialCommand } from './serialService.js';
 import { resetProductionCounters } from './productionRecordService.js';
 import { activateScheduleEntry } from './partScheduleService.js';
@@ -146,6 +146,18 @@ export function startWatchdogService(broadcast) {
       for (const machine of machines) {
         // Skip machines that have never sent a pulse and have no open Running log yet
         if (!machine.last_pulse && !machine.running_since) continue;
+
+        // Machine is Running but has no open status log - a resume racing with the ESP32's
+        // own immediate status telemetry (both close/open status_logs independently, with no
+        // locking between them) can leave zero open rows even though status is Running. Do
+        // NOT let that fall back to a pre-stop last_pulse from hours ago - it would look
+        // instantly "stale" and auto-stop the machine seconds after every long-stop resume.
+        // Self-heal the missing log and give this tick a pass instead.
+        if (!machine.running_since) {
+          logger.warn(`⏰ Watchdog: Machine ${machine.id} is Running with no open status log (resume race) - self-healing, skipping this tick's stale check.`);
+          await ensureActiveStatusLog(machine.id, 'Running', now);
+          continue;
+        }
 
         // Use whichever is more recent: a stale last_pulse from before a stop/resume
         // must not count the downtime gap against the machine the moment it resumes.
