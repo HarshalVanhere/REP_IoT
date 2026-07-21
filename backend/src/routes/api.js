@@ -10,6 +10,7 @@ import { recordAuditLog } from '../utils/auditLog.js';
 import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
 import { getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
 import { logger } from '../utils/logger.js';
+import { withMachineLock } from '../utils/machineLock.js';
 
 const router = express.Router();
 
@@ -61,12 +62,16 @@ router.get('/machines/:id/history', requireAuth, async (req, res) => {
 router.post('/machines/:id/stop', requireAuth, requireRole('Operator', 'Supervisor', 'Admin'), async (req, res) => {
   const machineId = req.params.id;
   try {
-    // 1. Trigger physical machine lockout and wait for ESP32 confirmation
-    await sendSerialCommand(machineId, 'stop');
+    // Serialized against the watchdog's stale-pulse auto-stop and the sync client's schedule
+    // pull so this can never race either of them for the same machine.
+    await withMachineLock(machineId, async () => {
+      // 1. Trigger physical machine lockout and wait for ESP32 confirmation
+      await sendSerialCommand(machineId, 'stop');
 
-    // 2. Only transition database/status after serial confirmation
-    await handleStatusMessage(machineId, 'Stopped');
-    await recordAuditLog(req.user.loginId, 'MACHINE_STOP', machineId);
+      // 2. Only transition database/status after serial confirmation
+      await handleStatusMessage(machineId, 'Stopped');
+      await recordAuditLog(req.user.loginId, 'MACHINE_STOP', machineId);
+    });
 
     res.json({ success: true, message: `CNC Machine ${machineId} status set to Stopped (Confirmed by hardware)` });
   } catch (err) {
@@ -126,24 +131,41 @@ router.post('/machines/:id/resume', requireAuth, requireRole('Operator', 'Superv
   }
 
   try {
-    // Production must never start without a valid, currently-active part schedule - never
-    // fall back to whatever part happened to be active before. See watchdogService.js's
-    // blockMachineWithoutSchedule() for the counterpart that clears this when a shift/schedule
-    // ends without a replacement.
-    const [machineRows] = await db.query('SELECT active_schedule_id FROM machines WHERE id = ?', [machineId]);
-    if (machineRows.length === 0) {
+    // Serialized against the watchdog's stale-pulse auto-stop and the sync client's schedule
+    // pull (which is the Edge Gateway's own schedule-presence authority - see
+    // syncService.pullMachineConfig) so a Resume can never be undone by either mid-flight.
+    let blocked = false;
+    await withMachineLock(machineId, async () => {
+      // Production must never start without a valid, currently-active part schedule - never
+      // fall back to whatever part happened to be active before. On an Edge Gateway this
+      // active_schedule_id is a mirror of whatever the Cloud resolved as active (see
+      // syncService.pullMachineConfig); on the Cloud/standalone it's set directly by
+      // watchdogService's scheduler. Either way, this check and the resume it gates are inside
+      // the same lock as the services that clear it, so the read here can never go stale.
+      const [machineRows] = await db.query('SELECT active_schedule_id FROM machines WHERE id = ?', [machineId]);
+      if (machineRows.length === 0) {
+        blocked = 'not_found';
+        return;
+      }
+      if (!machineRows[0].active_schedule_id) {
+        blocked = 'no_schedule';
+        return;
+      }
+
+      // 1. Trigger physical machine run enablement and wait for ESP32 confirmation
+      await sendSerialCommand(machineId, 'resume');
+
+      // 2. Only transition database/status after serial confirmation
+      await handleResumeMessage(machineId, reason, operatorId);
+      await recordAuditLog(req.user.loginId, 'MACHINE_RESUME', machineId, reason);
+    });
+
+    if (blocked === 'not_found') {
       return res.status(404).json({ error: 'Machine not found' });
     }
-    if (!machineRows[0].active_schedule_id) {
+    if (blocked === 'no_schedule') {
       return res.status(400).json({ error: 'No part is scheduled. Please schedule the part first from the PPC Engineer login.' });
     }
-
-    // 1. Trigger physical machine run enablement and wait for ESP32 confirmation
-    await sendSerialCommand(machineId, 'resume');
-
-    // 2. Only transition database/status after serial confirmation
-    await handleResumeMessage(machineId, reason, operatorId);
-    await recordAuditLog(req.user.loginId, 'MACHINE_RESUME', machineId, reason);
 
     res.json({ success: true, message: `CNC Machine ${machineId} resumed in Running state (Confirmed by hardware)` });
   } catch (err) {

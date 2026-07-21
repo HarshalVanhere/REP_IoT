@@ -3,6 +3,7 @@ import { handleStatusMessage, ensureActiveStatusLog } from './mqttService.js';
 import { sendSerialCommand } from './serialService.js';
 import { resetProductionCounters } from './productionRecordService.js';
 import { activateScheduleEntry } from './partScheduleService.js';
+import { withMachineLock } from '../utils/machineLock.js';
 import { logger } from '../utils/logger.js';
 import { getShiftForTimestamp, toDateOnlyString, buildPlantDateTime } from '../config/shifts.js';
 
@@ -25,25 +26,27 @@ const noScheduleLogged = new Set();
  * machine in this state stays blocked until the PPC Engineer creates and activates a real
  * schedule entry for the current machine/shift - nothing here can revive it automatically.
  */
-async function blockMachineWithoutSchedule(machine) {
-  await db.query(
-    'UPDATE machines SET active_part_name = NULL, assigned_operator = NULL, active_schedule_id = NULL WHERE id = ?',
-    [machine.id]
-  );
+function blockMachineWithoutSchedule(machine) {
+  return withMachineLock(machine.id, async () => {
+    await db.query(
+      'UPDATE machines SET active_part_name = NULL, assigned_operator = NULL, active_schedule_id = NULL WHERE id = ?',
+      [machine.id]
+    );
 
-  if (machine.status === 'Running') {
-    try {
-      await sendSerialCommand(machine.id, 'stop');
-    } catch (serialErr) {
-      logger.warn(`Watchdog: Failed to send interlock stop command while blocking machine ${machine.id}: ${serialErr.message}`);
+    if (machine.status === 'Running') {
+      try {
+        await sendSerialCommand(machine.id, 'stop');
+      } catch (serialErr) {
+        logger.warn(`Watchdog: Failed to send interlock stop command while blocking machine ${machine.id}: ${serialErr.message}`);
+      }
+      await handleStatusMessage(machine.id, 'Stopped');
     }
-    await handleStatusMessage(machine.id, 'Stopped');
-  }
 
-  if (!noScheduleLogged.has(machine.id)) {
-    logger.info(`⏰ Watchdog: Machine ${machine.id} has no scheduled part for the current shift - blocking production until PPC creates a schedule.`);
-    noScheduleLogged.add(machine.id);
-  }
+    if (!noScheduleLogged.has(machine.id)) {
+      logger.info(`⏰ Watchdog: Machine ${machine.id} has no scheduled part for the current shift - blocking production until PPC creates a schedule.`);
+      noScheduleLogged.add(machine.id);
+    }
+  });
 }
 
 /**
@@ -161,10 +164,27 @@ export function startWatchdogService(broadcast) {
   };
 
   watchdogInterval = setInterval(async () => {
-    try {
-      await applyScheduledParts();
-    } catch (err) {
-      logger.error('Watchdog Service Error (scheduled part sync):', err.message);
+    // The part_schedules table (and therefore this auto-advance/no-schedule-block scheduler)
+    // is only ever authoritative on the node PPC Engineers actually create schedules on. In a
+    // split Edge Gateway + Cloud deployment, that's the Cloud backend - the Edge Gateway has
+    // its own separate local DB whose part_schedules table is never written to (schedules never
+    // sync downward, only the *resolved* target/cycle/part/operator/active_schedule_id do, via
+    // syncService's pullMachineConfig). Running this scheduler on the Edge Gateway too meant it
+    // saw an always-empty local table on every tick and concluded "no schedule" for every
+    // machine, force-stopping it and wiping active_part_name/operator/active_schedule_id -
+    // seconds after pullMachineConfig had just restored them from the Cloud. That fight (this
+    // scheduler's 10s tick vs. pullMachineConfig's 5s tick) was the actual cause of: the "No
+    // Part Scheduled" flicker, the machine dropping back to Stopped 2-3s after Resume, and the
+    // Last Cycle value never settling (it kept getting reset by these spurious auto-stops and
+    // then re-populated by the next pulse, unrelated to any real stop condition).
+    // See syncService.pullMachineConfig() for the Edge Gateway's own schedule-presence check,
+    // which is the correct single source of truth for "is there really no schedule" there.
+    if (process.env.IS_EDGE_GATEWAY !== 'true') {
+      try {
+        await applyScheduledParts();
+      } catch (err) {
+        logger.error('Watchdog Service Error (scheduled part sync):', err.message);
+      }
     }
 
     try {
@@ -207,15 +227,21 @@ export function startWatchdogService(broadcast) {
         if (secondsSinceLastPulse > threshold) {
           logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Stopped.`);
 
-          // Trigger physical machine lockout interlock relay
-          try {
-            await sendSerialCommand(machine.id, 'stop');
-          } catch (serialErr) {
-            logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
-          }
+          // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
+          // this can never fire in the middle of - or immediately undo - an operator action or
+          // a schedule sync that's already in flight for the same machine.
+          await withMachineLock(machine.id, async () => {
+            // Trigger physical machine lockout interlock relay
+            try {
+              await sendSerialCommand(machine.id, 'stop');
+            } catch (serialErr) {
+              logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
+            }
 
-          // Force-transition status to Stopped (closes running log and creates stopped log)
-          await handleStatusMessage(machine.id, 'Stopped');
+            // Force-transition status to Stopped (closes running log and creates stopped log,
+            // and - see handleStatusMessage - stamps last_cycle_reset_at so Last Cycle reads 0)
+            await handleStatusMessage(machine.id, 'Stopped');
+          });
 
           if (shouldEmitAlert(`${machine.id}:stale`)) {
             emitAlert({

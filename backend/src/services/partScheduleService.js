@@ -3,21 +3,7 @@ import { logger } from '../utils/logger.js';
 import { resetProductionCounters } from './productionRecordService.js';
 import { handleStatusMessage } from './mqttService.js';
 import { recordAuditLog } from '../utils/auditLog.js';
-
-// In-process async mutex per machine. The watchdog's auto-advance tick and the PPC manual
-// override endpoint both run inside this same Node process (one process serves both the
-// 10s interval and the Express routes), so serializing here is enough to guarantee only one
-// activation is ever in flight for a given machine at a time - no DB-level locking needed.
-const machineLocks = new Map(); // machineId -> Promise chain tail
-
-function withMachineLock(machineId, fn) {
-  const previous = machineLocks.get(machineId) || Promise.resolve();
-  const next = previous.then(fn, fn).finally(() => {
-    if (machineLocks.get(machineId) === next) machineLocks.delete(machineId);
-  });
-  machineLocks.set(machineId, next);
-  return next;
-}
+import { withMachineLock } from '../utils/machineLock.js';
 
 /**
  * The single choke-point for closing out whichever part is currently active on a machine and
