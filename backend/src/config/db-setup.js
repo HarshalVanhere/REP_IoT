@@ -212,6 +212,12 @@ async function setup() {
       // Ignore if column already exists
     }
     try {
+      await connection.query('ALTER TABLE machines ADD COLUMN last_cycle_reset_at TIMESTAMP NULL');
+      console.log('   + Added "last_cycle_reset_at" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
       await connection.query('ALTER TABLE pulses ADD COLUMN part_schedule_id INT NULL');
       console.log('   + Added "part_schedule_id" column to pulses table');
     } catch (err) {

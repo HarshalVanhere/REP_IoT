@@ -158,15 +158,22 @@ export async function calculateOEE(machineId) {
     let shiftB = 0;
     let shiftC = 0;
 
+    // A Stop (operator-pressed or watchdog auto-stop) stamps last_cycle_reset_at - pulses from
+    // before that reset must not still be reported as the "last cycle time" after a Resume.
+    const lastCycleResetAt = machine.last_cycle_reset_at ? new Date(machine.last_cycle_reset_at) : null;
+
     if (db.isMock) {
       const [pulses] = await db.query(
         'SELECT timestamp, cycle_time, is_good FROM pulses WHERE machine_id = ? AND timestamp >= ?',
         [machineId, midnight]
       );
 
-      // Calculate last cycle time
-      if (pulses.length > 0) {
-        lastCycleTime = parseFloat(pulses[pulses.length - 1].cycle_time || 0);
+      // Calculate last cycle time (ignoring any pulse that predates the last Stop)
+      const pulsesSinceReset = lastCycleResetAt
+        ? pulses.filter((p) => new Date(p.timestamp).getTime() > lastCycleResetAt.getTime())
+        : pulses;
+      if (pulsesSinceReset.length > 0) {
+        lastCycleTime = parseFloat(pulsesSinceReset[pulsesSinceReset.length - 1].cycle_time || 0);
       }
 
       // Shift-wise production count (A, B, C)
@@ -177,10 +184,10 @@ export async function calculateOEE(machineId) {
         else shiftC++;
       });
     } else {
-      // 1. Fetch last cycle time (limit 1)
+      // 1. Fetch last cycle time (limit 1), ignoring any pulse that predates the last Stop
       const [lastPulseRows] = await db.query(
-        'SELECT cycle_time FROM pulses WHERE machine_id = ? ORDER BY timestamp DESC LIMIT 1',
-        [machineId]
+        'SELECT cycle_time FROM pulses WHERE machine_id = ? AND (? IS NULL OR timestamp > ?) ORDER BY timestamp DESC LIMIT 1',
+        [machineId, lastCycleResetAt, lastCycleResetAt]
       );
       if (lastPulseRows.length > 0) {
         lastCycleTime = parseFloat(lastPulseRows[0].cycle_time || 0);

@@ -189,7 +189,15 @@ export async function handleStatusMessage(machineId, status) {
   if (currentStatus !== status) {
     // 2. Update machine status in database
     await db.query('UPDATE machines SET status = ? WHERE id = ?', [status, machineId]);
-    
+
+    // Stopping the machine - whether the operator pressed Stop on the touchscreen, or the
+    // watchdog auto-stopped it after no pulse for ideal_cycle_time + 2min - must not leave a
+    // stale "last cycle time" on display from before this stop. Both paths funnel through here,
+    // so this is the single choke-point for the reset (see calculateOEE() for the read side).
+    if (status === 'Stopped') {
+      await db.query('UPDATE machines SET last_cycle_reset_at = ? WHERE id = ?', [timestamp, machineId]);
+    }
+
     // 3. Transition status logs
     await ensureActiveStatusLog(machineId, status, timestamp);
     logger.info(`🔌 Machine ${machineId} transitioned: ${currentStatus} ➡️ ${status}`);

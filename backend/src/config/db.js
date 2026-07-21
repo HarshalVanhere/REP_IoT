@@ -33,7 +33,7 @@ const mockDb = {
   part_schedules: []
 };
 
-mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; m.last_manual_reset_at = null; });
+mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; m.last_manual_reset_at = null; m.last_cycle_reset_at = null; });
 
 let mockPulseId = 1;
 let mockLogId = 1;
@@ -343,6 +343,17 @@ try {
     try {
       await pool.query('ALTER TABLE machines ADD COLUMN last_manual_reset_at TIMESTAMP NULL');
       console.log('   + Added "last_manual_reset_at" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
+    // Stamped every time a machine transitions to Stopped (operator-pressed Stop, or the
+    // watchdog's no-pulse-for-ideal-cycle+2min auto-stop) - see handleStatusMessage(). Lets
+    // calculateOEE() ignore pulses from before the stop when reporting "last cycle time", so a
+    // long-stale cycle time from before a long Stop doesn't keep showing after Resume.
+    try {
+      await pool.query('ALTER TABLE machines ADD COLUMN last_cycle_reset_at TIMESTAMP NULL');
+      console.log('   + Added "last_cycle_reset_at" column to machines table');
     } catch (err) {
       // Ignore if column already exists
     }
@@ -675,6 +686,13 @@ async function mockQuery(sql, params = []) {
       const machine = mockDb.machines.find(m => m.id === machineId);
       if (machine) {
         machine.last_manual_reset_at = resetAt;
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set last_cycle_reset_at = ?')) {
+      const [resetAt, machineId] = params;
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.last_cycle_reset_at = resetAt;
         affectedRows = 1;
       }
     } else if (sqlLower.includes('set production_count = 0')) {
