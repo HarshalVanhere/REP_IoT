@@ -522,22 +522,26 @@ async function mockQuery(sql, params = []) {
   // 5. UPDATE status_logs
   if (sqlLower.startsWith('update status_logs')) {
     let affectedRows = 0;
+    // Bulk-close every open log for a machine (WHERE machine_id = ? AND end_time IS NULL) -
+    // used to guarantee no stray duplicate open rows are ever left behind, vs. the legacy
+    // close-by-specific-id pattern below.
+    const closesByMachine = sqlLower.includes('where machine_id = ?') && sqlLower.includes('end_time is null');
+
     if (sqlLower.includes('downtime_reason = ?') || sqlLower.includes('downtime_reason=?')) {
-      const endTime = params[0];
-      const reason = params[1];
-      const logId = params[2];
+      const [endTime, reason, target] = params;
       mockDb.status_logs.forEach(log => {
-        if (log.id === logId) {
+        const matches = closesByMachine ? (log.machine_id === target && log.end_time === null) : (log.id === target);
+        if (matches) {
           log.end_time = endTime;
           log.downtime_reason = reason;
           affectedRows++;
         }
       });
     } else {
-      const endTime = params[0];
-      const logId = params[1];
+      const [endTime, target] = params;
       mockDb.status_logs.forEach(log => {
-        if (log.id === logId) {
+        const matches = closesByMachine ? (log.machine_id === target && log.end_time === null) : (log.id === target);
+        if (matches) {
           log.end_time = endTime;
           affectedRows++;
         }

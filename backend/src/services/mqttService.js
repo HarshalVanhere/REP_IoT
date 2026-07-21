@@ -232,14 +232,18 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
   );
 
   if (activeLogs.length > 0) {
-    const activeLog = activeLogs[0];
-    // Reset synced=FALSE: this row may have already been uploaded to the cloud while it was
+    // Close EVERY open log for this machine, not just the first one found - a resume racing
+    // the ESP32's own immediate status telemetry (both independently touch status_logs with
+    // no locking between them) can leave more than one open row. Closing only one lets the
+    // rest live open forever, and the watchdog's LEFT JOIN against status_logs then matches
+    // one result row per stray duplicate, misfiring its stale-pulse check once per duplicate.
+    // Reset synced=FALSE: this may have already been uploaded to the cloud while it was
     // still open (no reason yet) - without this, the sync client's "WHERE synced = 0" query
     // never picks the row up again, and the downtime reason/end_time silently never reaches
     // the cloud dashboard.
     await db.query(
-      'UPDATE status_logs SET end_time = ?, downtime_reason = ?, synced = FALSE WHERE id = ?',
-      [timestamp, reason, activeLog.id]
+      'UPDATE status_logs SET end_time = ?, downtime_reason = ?, synced = FALSE WHERE machine_id = ? AND end_time IS NULL',
+      [timestamp, reason, machineId]
     );
   }
 
@@ -279,19 +283,20 @@ export async function ensureActiveStatusLog(machineId, targetStatus, timestamp) 
     [machineId]
   );
 
+  // Already exactly one open log with the right status - nothing to do.
+  if (activeLogs.length === 1 && activeLogs[0].status === targetStatus) {
+    return;
+  }
+
   if (activeLogs.length > 0) {
-    const activeLog = activeLogs[0];
-    if (activeLog.status === targetStatus) {
-      // Already correct, do nothing
-      return;
-    }
-    
-    // Status has changed! Close the active log.
+    // Close EVERY open log for this machine, not just the first one found - see
+    // handleResumeMessage for why duplicates can occur and why leaving any open is what lets
+    // the watchdog's LEFT JOIN misfire once per stray duplicate.
     // Reset synced=FALSE so the corrected end_time re-uploads even if this row already
-    // synced to the cloud while it was still open (see handleResumeMessage for the same fix).
+    // synced to the cloud while it was still open.
     await db.query(
-      'UPDATE status_logs SET end_time = ?, synced = FALSE WHERE id = ?',
-      [timestamp, activeLog.id]
+      'UPDATE status_logs SET end_time = ?, synced = FALSE WHERE machine_id = ? AND end_time IS NULL',
+      [timestamp, machineId]
     );
   }
 
