@@ -3,7 +3,6 @@ const char* machine_id = "1313"; // Machine ID matching database (1313 ACE CNC S
 
 // --- Pin Definitions ---
 const int PIN_PULSE = 4;   // GPIO 4 - Cycle Finish Relay NO Contact (Pulls to 3.3V when closed)
-const int PIN_STATUS = 5;  // GPIO 5 - Green Stack Light Relay NO Contact (HIGH = Running, LOW = Stopped)
 const int PIN_RUN_ENABLE = 27; // GPIO 27 - Output to CNC Interlock Relay Coil (Safer than GPIO 12 bootstrapping pin)
 
 // --- Debounce & Timing Variables ---
@@ -17,20 +16,16 @@ int stablePulseState = LOW;
 unsigned long lastPulsePinChange = 0;
 const unsigned long RELAY_DEBOUNCE_DELAY = 50; // 50ms contact debounce time
 
-int lastStatusState = -1; // -1 = uninitialized
-unsigned long lastStatusCheck = 0;
-const unsigned long STATUS_CHECK_INTERVAL = 500; // Poll status state every 500ms
-
 // Character buffer for incoming serial command lines
 char rxBuffer[128];
 size_t rxIndex = 0;
 
 void sendCurrentStatus() {
-  int rawVal = digitalRead(PIN_STATUS);
   int runEnableVal = digitalRead(PIN_RUN_ENABLE);
-  // Relay energized pulls pin HIGH -> Machine is Running, BUT only if interlock is also enabled!
-  const char* statusStr = (runEnableVal == HIGH && rawVal == HIGH) ? "Running" : "Stopped";
-  
+  // Status is authoritative from the interlock relay we ourselves drive - no separate
+  // physical "is it actually running" sensing.
+  const char* statusStr = (runEnableVal == HIGH) ? "Running" : "Stopped";
+
   // Output JSON formatted telemetry over Serial
   Serial.print("{\"type\":\"status\",\"status\":\"");
   Serial.print(statusStr);
@@ -44,16 +39,20 @@ void parseCommand(const char* line) {
   if (strstr(line, "\"command\":\"resume\"") != NULL) {
     digitalWrite(PIN_RUN_ENABLE, HIGH);
     Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay energized (Run Enabled)\"}");
-    
+
     // Reset cycle start timer on resume so that the next pulse calculates cycle duration correctly
     lastCycleStart = millis();
-    
+
+    sendCurrentStatus();
+
     // Emit command acknowledgement
     Serial.println("{\"type\":\"ack\",\"command\":\"resume\",\"status\":\"success\"}");
   } else if (strstr(line, "\"command\":\"stop\"") != NULL) {
     digitalWrite(PIN_RUN_ENABLE, LOW);
     Serial.println("{\"type\":\"log\",\"message\":\"CNC interlock relay de-energized (Run Locked)\"}");
-    
+
+    sendCurrentStatus();
+
     // Emit command acknowledgement
     Serial.println("{\"type\":\"ack\",\"command\":\"stop\",\"status\":\"success\"}");
   }
@@ -87,10 +86,9 @@ void setup() {
   // Initialize Serial port for USB communication at 115200 baud
   Serial.begin(115200);
   
-  // Configure input pins with internal pull-down to prevent floating signals
+  // Configure input pin with internal pull-down to prevent floating signal
   pinMode(PIN_PULSE, INPUT_PULLDOWN);
-  pinMode(PIN_STATUS, INPUT_PULLDOWN);
-  
+
   // Configure run-enable output pin, starting in LOW (disabled) state for safety
   pinMode(PIN_RUN_ENABLE, OUTPUT);
   digitalWrite(PIN_RUN_ENABLE, LOW);
@@ -143,19 +141,5 @@ void loop() {
       // Transition back to LOW
       stablePulseState = LOW;
     }
-  }
-
-  // --- 2. Read Running/Stopped Status changes ---
-  if (millis() - lastStatusCheck > STATUS_CHECK_INTERVAL) {
-    int currentVal = digitalRead(PIN_STATUS);
-    if (currentVal != lastStatusState) {
-      // If machine transitioned from Stopped to Running, reset the cycle start timer
-      if (currentVal == HIGH && lastStatusState == LOW) {
-        lastCycleStart = millis();
-      }
-      lastStatusState = currentVal;
-      sendCurrentStatus();
-    }
-    lastStatusCheck = millis();
   }
 }

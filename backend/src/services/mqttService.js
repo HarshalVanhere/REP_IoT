@@ -112,6 +112,14 @@ export async function handlePulseMessage(machineId, payload) {
     return;
   }
 
+  // While the machine is deliberately Stopped, ignore pulses entirely - no row in `pulses`,
+  // no count increment. Status is only ever changed by an explicit status message
+  // (see handleStatusMessage), never inferred from a pulse arriving.
+  if (machines[0].status === 'Stopped') {
+    logger.info(`Machine ${machineId} is Stopped - ignoring pulse (not counted).`);
+    return;
+  }
+
   // 2. Insert pulse log into database, stamped with whichever scheduled part is currently
   // active (if any) so per-part production can be attributed correctly even when execution
   // has diverged from the plan (manual overrides, forced end-time cutovers).
@@ -121,39 +129,16 @@ export async function handlePulseMessage(machineId, payload) {
   );
 
   // 3. Update machine metrics in the database.
-  // IMPORTANT: do NOT blindly force status back to 'Running' here. A pulse can legitimately
-  // arrive right after an operator/watchdog Stop - the CNC's in-flight cycle finishes and the
-  // ESP32 reports it over serial even though the interlock relay has already been de-energized.
-  // Counting that trailing part is correct; silently flipping the machine back to Running is not
-  // - it would undo an Emergency Stop the moment the residual cycle completes. Only auto-resume
-  // to Running when the machine wasn't deliberately Stopped (e.g. it was Running or reconnecting
-  // from No Signal).
-  const currentStatus = machines[0].status;
   const countField = isGood ? 'good_count' : 'scrap_count';
 
-  if (currentStatus === 'Stopped') {
-    await db.query(
-      `UPDATE machines SET
-        production_count = production_count + 1,
-        ${countField} = ${countField} + 1,
-        last_pulse = ?
-       WHERE id = ?`,
-      [timestamp, machineId]
-    );
-  } else {
-    await db.query(
-      `UPDATE machines SET
-        production_count = production_count + 1,
-        ${countField} = ${countField} + 1,
-        last_pulse = ?,
-        status = 'Running'
-       WHERE id = ?`,
-      [timestamp, machineId]
-    );
-
-    // Ensure machine is set to running and has active status log
-    await ensureActiveStatusLog(machineId, 'Running', timestamp);
-  }
+  await db.query(
+    `UPDATE machines SET
+      production_count = production_count + 1,
+      ${countField} = ${countField} + 1,
+      last_pulse = ?
+     WHERE id = ?`,
+    [timestamp, machineId]
+  );
 
   // 4. Recalculate OEE
   const oeeMetrics = await calculateOEE(machineId);
