@@ -2,6 +2,7 @@
 // Consumed by oeeCalculator.js (aggregation), api.js (GET /api/reason-codes),
 // and fetched once by the frontend instead of being hardcoded in multiple components.
 export const PREDEFINED_REASONS = [
+  'Shift Start',
   'Tea Break',
   'Lunch Break',
   'Tool Wear / Replacement',

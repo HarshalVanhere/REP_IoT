@@ -123,3 +123,29 @@
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
 }
+
+/* Print isolation: only a `.print-area` element (and its contents) prints - the sidebar,
+   topbar, filter controls, and action buttons (marked `.no-print`) are stripped out so
+   "Print Report" produces a clean report page instead of the full app chrome. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .jbm-card {
+    break-inside: avoid;
+    box-shadow: none !important;
+  }
+}

@@ -127,6 +127,87 @@ function getIntervalOverlapSeconds(start1, end1, start2, end2) {
 }
 
 /**
+ * Clips a set of status_logs rows to [windowStart, windowEnd], subtracts any overlap with the
+ * given planned breaks, and buckets the remaining duration into Running/Stopped/No Signal
+ * totals (plus downtime-by-reason). Shared by the live "since midnight" calculation below and
+ * reportingService.js's arbitrary historical windows, so the two can never compute utilization
+ * differently.
+ */
+export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
+  let runningSeconds = 0;
+  let stoppedSeconds = 0;
+  let noSignalSeconds = 0;
+  let breakSeconds = 0;
+
+  const downtimeReasons = {};
+  PREDEFINED_REASONS.forEach(r => downtimeReasons[r] = 0);
+
+  logs.forEach(log => {
+    const logStart = new Date(Math.max(new Date(log.start_time).getTime(), windowStart.getTime()));
+    const logEnd = log.end_time ? new Date(Math.min(new Date(log.end_time).getTime(), windowEnd.getTime())) : windowEnd;
+    let durationSeconds = Math.max(0, (logEnd.getTime() - logStart.getTime()) / 1000);
+
+    // Subtract any planned break overlap so operators are not penalized for lunch/tea breaks
+    let overlapSeconds = 0;
+    breaks.forEach(b => {
+      overlapSeconds += getIntervalOverlapSeconds(logStart, logEnd, b.start, b.end);
+    });
+    durationSeconds -= overlapSeconds;
+    breakSeconds += overlapSeconds;
+
+    if (log.status === 'Running') {
+      runningSeconds += durationSeconds;
+    } else if (log.status === 'Stopped') {
+      stoppedSeconds += durationSeconds;
+      // Group by reason if available
+      const reason = log.downtime_reason || 'Other';
+      if (downtimeReasons[reason] !== undefined) {
+        downtimeReasons[reason] += durationSeconds;
+      } else {
+        downtimeReasons['Other'] += durationSeconds;
+      }
+    } else if (log.status === 'No Signal') {
+      noSignalSeconds += durationSeconds;
+    }
+  });
+
+  return { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons };
+}
+
+/**
+ * Availability/Performance/Quality/OEE - the one and only place these formulas are implemented.
+ * Both the live "today" calculation below and reportingService.js's historical report call
+ * this same pure function so the two can never drift apart.
+ */
+export function computeOeeFromTotals({ plannedSeconds, operatingSeconds, totalCount, goodCount, idealCycleTime }) {
+  // Availability = Operating Time / Planned Production Time
+  let availability = plannedSeconds > 0
+    ? (operatingSeconds / plannedSeconds) * 100
+    : 100;
+  availability = Math.max(0, Math.min(100, availability));
+
+  // Performance = (Ideal Cycle Time * Total Count) / Operating Time
+  let performance = 100;
+  if (operatingSeconds > 0) {
+    performance = ((totalCount * idealCycleTime) / operatingSeconds) * 100;
+    performance = Math.max(0, Math.min(100, performance));
+  } else {
+    performance = totalCount > 0 ? 100 : 0;
+  }
+
+  // Quality = Good Parts / Total Count
+  let quality = 100;
+  if (totalCount > 0) {
+    quality = (goodCount / totalCount) * 100;
+    quality = Math.max(0, Math.min(100, quality));
+  }
+
+  const oee = (availability / 100) * (performance / 100) * (quality / 100) * 100;
+
+  return { availability, performance, quality, oee };
+}
+
+/**
  * Calculates Availability, Performance, Quality, OEE, shifts count,
  * machine utilization, downtime reasons, and last cycle time.
  */
@@ -210,43 +291,10 @@ export async function calculateOEE(machineId) {
       }
     }
 
-    // 6. Calculate durations for utilization (Running, Stopped, No Signal)
-    let runningSeconds = 0;
-    let stoppedSeconds = 0;
-    let noSignalSeconds = 0;
-
-    // Aggregate downtime by reason
-    const downtimeReasons = {};
-    PREDEFINED_REASONS.forEach(r => downtimeReasons[r] = 0);
-
+    // 6. Aggregate today's status logs into utilization/downtime totals via the shared helper
     const todayBreaks = getPlannedBreaks(midnight);
-
-    logs.forEach(log => {
-      const logStart = new Date(Math.max(new Date(log.start_time).getTime(), midnight.getTime()));
-      const logEnd = log.end_time ? new Date(Math.min(new Date(log.end_time).getTime(), now.getTime())) : now;
-      let durationSeconds = Math.max(0, (logEnd.getTime() - logStart.getTime()) / 1000);
-
-      // Subtract any planned break overlap so operators are not penalized for lunch/tea breaks
-      todayBreaks.forEach(b => {
-        const overlap = getIntervalOverlapSeconds(logStart, logEnd, b.start, b.end);
-        durationSeconds -= overlap;
-      });
-
-      if (log.status === 'Running') {
-        runningSeconds += durationSeconds;
-      } else if (log.status === 'Stopped') {
-        stoppedSeconds += durationSeconds;
-        // Group by reason if available
-        const reason = log.downtime_reason || 'Other';
-        if (downtimeReasons[reason] !== undefined) {
-          downtimeReasons[reason] += durationSeconds;
-        } else {
-          downtimeReasons['Other'] += durationSeconds;
-        }
-      } else if (log.status === 'No Signal') {
-        noSignalSeconds += durationSeconds;
-      }
-    });
+    const { runningSeconds, stoppedSeconds, noSignalSeconds, downtimeReasons } =
+      aggregateStatusLogs(logs, midnight, now, todayBreaks);
 
     // Planned production seconds today
     const plannedSeconds = getPlannedProductionSeconds(now);
@@ -260,29 +308,13 @@ export async function calculateOEE(machineId) {
     let operatingTimeSeconds = plannedSeconds - totalDowntimeSeconds;
     if (operatingTimeSeconds < 0) operatingTimeSeconds = 0;
 
-    let availability = plannedSeconds > 0 
-      ? (operatingTimeSeconds / plannedSeconds) * 100 
-      : 100;
-    availability = Math.max(0, Math.min(100, availability));
-
-    // Performance = (Parts Produced * Ideal Cycle Time) / Operating Time
-    let performance = 100;
-    if (operatingTimeSeconds > 0) {
-      performance = ((totalCount * idealCycleTime) / operatingTimeSeconds) * 100;
-      performance = Math.max(0, Math.min(100, performance));
-    } else {
-      performance = totalCount > 0 ? 100 : 0;
-    }
-
-    // Quality = Good Parts / Total Parts
-    let quality = 100;
-    if (totalCount > 0) {
-      quality = (goodCount / totalCount) * 100;
-      quality = Math.max(0, Math.min(100, quality));
-    }
-
-    // Overall OEE
-    const oee = (availability / 100) * (performance / 100) * (quality / 100) * 100;
+    const { availability, performance, quality, oee } = computeOeeFromTotals({
+      plannedSeconds,
+      operatingSeconds: operatingTimeSeconds,
+      totalCount,
+      goodCount,
+      idealCycleTime
+    });
 
     // Determine current active shift
     const currentShift = getShiftForTimestamp(now);

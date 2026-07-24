@@ -23,7 +23,8 @@ import {
   Download,
   Flame,
   UserCheck,
-  PackageCheck
+  PackageCheck,
+  Gauge
 } from 'lucide-react';
 import Header from './components/Header';
 import LoginScreen from './components/LoginScreen';
@@ -44,6 +45,7 @@ const AnalyticsCharts = lazy(() => import('./components/AnalyticsCharts'));
 const ReportsLog = lazy(() => import('./components/ReportsLog'));
 const PartScheduleBoard = lazy(() => import('./components/PartScheduleBoard'));
 const ProductionSummary = lazy(() => import('./components/ProductionSummary'));
+const OeeReportPage = lazy(() => import('./components/OeeReportPage'));
 
 function ViewLoadingFallback() {
   return (
@@ -139,6 +141,17 @@ function AppShell() {
   const isKioskMode = typeof window !== 'undefined' &&
     (window.location.pathname.endsWith('/operator') || window.location.search.includes('view=operator'));
   const [kioskAutoLoginDone, setKioskAutoLoginDone] = useState(false);
+
+  // The same dashboard build is deployed both on-site (edge gateway, wired to real machine
+  // hardware) and in the cloud (remote monitoring only, no hardware attached) - GET /api/health
+  // is the one endpoint that tells the frontend which backend it's actually talking to. Defaults
+  // to true (today's behavior - nav item shown) until the check resolves, so nothing changes on
+  // the edge gateway; a cloud-hosted dashboard flips it to false and the Operator Panel nav item
+  // (simulated PLC telemetry - meaningless without real hardware behind it) disappears.
+  const [isEdgeGateway, setIsEdgeGateway] = useState(true);
+  useEffect(() => {
+    apiFetch('/api/health').then((data) => setIsEdgeGateway(!!data?.edgeGateway)).catch(() => {});
+  }, []);
 
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
@@ -887,18 +900,36 @@ function AppShell() {
               {!sidebarCollapsed && <span>Production Summary</span>}
             </button>
 
-            {/* 6. Operator Simulator Panel */}
+            {/* 5.6 Machine-Wise OEE Report + Downtime Analysis */}
             <button
-              onClick={() => { setActiveView('operator'); setMobileSidebarOpen(false); }}
+              onClick={() => { setActiveView('oee-reports'); setMobileSidebarOpen(false); }}
+              disabled={sessionUser.role === 'Operator'}
               className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
-                activeView === 'operator'
+                sessionUser.role === 'Operator'
+                  ? 'text-slate-300 cursor-not-allowed opacity-50'
+                  : activeView === 'oee-reports'
                   ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
                   : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
               }`}
             >
-              <TabletSmartphone className="w-5 h-5 shrink-0" />
-              {!sidebarCollapsed && <span>Operator Panel</span>}
+              <Gauge className="w-5 h-5 shrink-0" />
+              {!sidebarCollapsed && <span>OEE & Downtime Reports</span>}
             </button>
+
+            {/* 6. Operator Simulator Panel - edge gateway only, see isEdgeGateway above */}
+            {isEdgeGateway && (
+              <button
+                onClick={() => { setActiveView('operator'); setMobileSidebarOpen(false); }}
+                className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
+                  activeView === 'operator'
+                    ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`}
+              >
+                <TabletSmartphone className="w-5 h-5 shrink-0" />
+                {!sidebarCollapsed && <span>Operator Panel</span>}
+              </button>
+            )}
 
             {/* 7. User Profiles CRUD */}
             {sessionUser.role === 'Admin' && (
@@ -1315,6 +1346,17 @@ function AppShell() {
                 <ProductionSummary authToken={authToken} onAuthError={handleAuthError} />
               </Suspense>
             </div>
+          ) : activeView === 'oee-reports' ? (
+            // 5.6 Machine-Wise OEE Report + Downtime Analysis (historical, date-range reporting)
+            <Suspense fallback={<ViewLoadingFallback />}>
+              <OeeReportPage
+                authToken={authToken}
+                machines={machines}
+                reasonCodes={reasonCodes}
+                onAuthError={handleAuthError}
+                currentUser={sessionUser}
+              />
+            </Suspense>
           ) : activeView === 'users' ? (
             // 6. User Profiles CRUD Manager (Admin Only)
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-200 text-left">

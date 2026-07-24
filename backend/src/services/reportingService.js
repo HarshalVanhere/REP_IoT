@@ -1,0 +1,551 @@
+import db from '../config/db.js';
+import { SHIFT_NAMES, getShiftWindow, getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
+import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals } from './oeeCalculator.js';
+
+// Downtime reasons treated as "Planned" for the Downtime Analysis module's Planned/Unplanned
+// split - everything else in PREDEFINED_REASONS (config/reasonCodes.js) is Unplanned.
+const PLANNED_REASONS = new Set([
+  'Tea Break',
+  'Lunch Break',
+  'Preventive Maintenance'
+]);
+
+const round1 = (n) => Math.round((n || 0) * 10) / 10;
+
+/**
+ * Inclusive list of 'YYYY-MM-DD' calendar-date strings between startDate and endDate.
+ * Pure string/UTC arithmetic - these are calendar-date labels, not instants, so no plant
+ * timezone conversion is needed here (that happens later, in getShiftWindow).
+ */
+function dateRange(startDate, endDate) {
+  const dates = [];
+  let cursor = startDate;
+  while (cursor <= endDate) {
+    dates.push(cursor);
+    const d = new Date(`${cursor}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 1);
+    cursor = d.toISOString().slice(0, 10);
+  }
+  return dates;
+}
+
+function isoWeekKey(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  const target = new Date(d.valueOf());
+  const dayNr = (d.getUTCDay() + 6) % 7;
+  target.setUTCDate(target.getUTCDate() - dayNr + 3);
+  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+  const weekNumber = 1 + Math.round(((target - firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
+  return `${target.getUTCFullYear()}-W${String(weekNumber).padStart(2, '0')}`;
+}
+
+/**
+ * Fetches pulses for a machine clipped to [windowStart, windowEnd). Mock DB mode has no
+ * range-filtering SQL support, so it fetches the (small, seeded) full set and filters in JS -
+ * the same db.isMock branching pattern already used throughout oeeCalculator.js/mqttService.js.
+ * The real-MySQL path uses the range predicate directly, benefiting from the new
+ * idx_pulses_machine_timestamp index.
+ */
+async function fetchPulsesInRange(machineId, windowStart, windowEnd) {
+  if (db.isMock) {
+    const [pulses] = await db.query('SELECT * FROM pulses WHERE machine_id = ?', [machineId]);
+    return pulses.filter((p) => {
+      const t = new Date(p.timestamp).getTime();
+      return t >= windowStart.getTime() && t < windowEnd.getTime();
+    });
+  }
+  const [pulses] = await db.query(
+    'SELECT id, timestamp, cycle_time, is_good, part_schedule_id FROM pulses WHERE machine_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC',
+    [machineId, windowStart, windowEnd]
+  );
+  return pulses;
+}
+
+/**
+ * Fetches status_logs overlapping [windowStart, windowEnd) for a machine (same mock/real
+ * branching as fetchPulsesInRange, benefiting from idx_status_logs_machine_start on real MySQL).
+ */
+async function fetchStatusLogsOverlapping(machineId, windowStart, windowEnd) {
+  if (db.isMock) {
+    const [logs] = await db.query('SELECT * FROM status_logs WHERE machine_id = ?', [machineId]);
+    return logs.filter((l) => {
+      const s = new Date(l.start_time).getTime();
+      const e = l.end_time ? new Date(l.end_time).getTime() : Infinity;
+      return s < windowEnd.getTime() && e > windowStart.getTime();
+    });
+  }
+  const [logs] = await db.query(
+    `SELECT id, status, start_time, end_time, downtime_reason, operator_id, part_name
+     FROM status_logs
+     WHERE machine_id = ? AND start_time < ? AND (end_time IS NULL OR end_time > ?)
+     ORDER BY start_time ASC`,
+    [machineId, windowEnd, windowStart]
+  );
+  return logs;
+}
+
+/**
+ * Reads part_schedules for one (machine, date, shift) to get the scheduled target, ideal cycle
+ * time, operator(s), and active part name - the same table/attribution partSchedules.js's
+ * computeActualForEntry() already trusts. Falls back to the machine's own defaults when nothing
+ * was scheduled for that shift (machine ran "unscheduled").
+ */
+function deriveShiftMeta(entries, machineDefault = {}) {
+  if (entries.length === 0) {
+    return {
+      target: 0,
+      idealCycleTime: machineDefault.ideal_cycle_time || 15,
+      operator: machineDefault.assigned_operator || null,
+      partName: null,
+      partScheduleIds: [],
+      scheduled: false
+    };
+  }
+
+  const target = entries.reduce((sum, e) => sum + (e.target || 0), 0);
+  const operators = [...new Set(entries.map((e) => e.operator).filter(Boolean))];
+  const parts = [...new Set(entries.map((e) => e.part_name).filter(Boolean))];
+  const primary = entries.find((e) => e.status === 'Running') || entries.find((e) => e.status === 'Completed') || entries[0];
+
+  return {
+    target,
+    idealCycleTime: primary.ideal_cycle_time,
+    operator: operators.length > 0 ? operators.join(', ') : null,
+    partName: parts.length > 0 ? parts.join(', ') : null,
+    partScheduleIds: entries.map((e) => e.id),
+    scheduled: true
+  };
+}
+
+export async function getShiftMeta(machineId, dateStr, shiftName) {
+  const [entries] = await db.query(
+    'SELECT * FROM part_schedules WHERE machine_id = ? AND plan_date = ? AND shift = ? ORDER BY sequence ASC',
+    [machineId, dateStr, shiftName]
+  );
+
+  if (entries.length === 0) {
+    const [machines] = await db.query(
+      'SELECT ideal_cycle_time, active_part_name, assigned_operator FROM machines WHERE id = ?',
+      [machineId]
+    );
+    return deriveShiftMeta([], machines[0] || {});
+  }
+
+  return deriveShiftMeta(entries);
+}
+
+/**
+ * Computes the same Availability/Performance/Quality/OEE (and supporting totals) as the live
+ * dashboard, but for an arbitrary [windowStart, windowEnd) instead of "since midnight" - reuses
+ * aggregateStatusLogs/computeOeeFromTotals from oeeCalculator.js so there is exactly one
+ * implementation of the formulas.
+ */
+export async function computeWindowMetrics(machineId, dateStr, windowStart, windowEnd, {
+  idealCycleTime, partScheduleIds, machineIdealCycleTime, statusLogs: preStatusLogs, pulses: prePulses
+} = {}) {
+  const now = new Date();
+  const effectiveEnd = windowEnd.getTime() > now.getTime() ? now : windowEnd;
+  const clippedEnd = effectiveEnd.getTime() < windowStart.getTime() ? windowStart : effectiveEnd;
+
+  let effectiveIdealCycleTime = idealCycleTime;
+  if (effectiveIdealCycleTime == null) {
+    if (machineIdealCycleTime != null) {
+      effectiveIdealCycleTime = machineIdealCycleTime;
+    } else {
+      const [machines] = await db.query('SELECT ideal_cycle_time FROM machines WHERE id = ?', [machineId]);
+      effectiveIdealCycleTime = machines[0]?.ideal_cycle_time || 15;
+    }
+  }
+
+  // When the caller already bulk-fetched pulses/statusLogs for a wider range (see
+  // buildOeeReportRows), slice them in-memory instead of re-querying the DB per shift - avoids
+  // one network round-trip per (date x shift) against a remote MySQL host.
+  const statusLogs = preStatusLogs
+    ? preStatusLogs.filter((l) => {
+        const s = new Date(l.start_time).getTime();
+        const e = l.end_time ? new Date(l.end_time).getTime() : Infinity;
+        return s < clippedEnd.getTime() && e > windowStart.getTime();
+      })
+    : await fetchStatusLogsOverlapping(machineId, windowStart, clippedEnd);
+
+  let pulses = prePulses
+    ? prePulses.filter((p) => {
+        const t = new Date(p.timestamp).getTime();
+        return t >= windowStart.getTime() && t < clippedEnd.getTime();
+      })
+    : await fetchPulsesInRange(machineId, windowStart, clippedEnd);
+
+  if (partScheduleIds && partScheduleIds.length > 0) {
+    const idSet = new Set(partScheduleIds);
+    pulses = pulses.filter((p) => idSet.has(p.part_schedule_id));
+  }
+
+  // The shift/day windows this function is ever called with always fall within a single plant
+  // calendar day (Shift C 00:00-07:00, A 07:00-15:30, B 15:30-24:00, "day" = the union of all
+  // three) - one getPlannedBreaks(midnight) call per dateStr covers the whole window.
+  const midnight = getShiftWindow(dateStr, 'Shift C').start;
+  const breaks = getPlannedBreaks(midnight);
+
+  const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons } =
+    aggregateStatusLogs(statusLogs, windowStart, clippedEnd, breaks);
+
+  const totalWindowSeconds = Math.max(0, (clippedEnd.getTime() - windowStart.getTime()) / 1000);
+  const plannedSeconds = Math.max(1, totalWindowSeconds - breakSeconds);
+
+  const totalDowntimeSeconds = stoppedSeconds + noSignalSeconds;
+  let operatingSeconds = plannedSeconds - totalDowntimeSeconds;
+  if (operatingSeconds < 0) operatingSeconds = 0;
+
+  const totalCount = pulses.length;
+  const goodCount = pulses.filter((p) => p.is_good === 1 || p.is_good === true).length;
+  const rejectCount = totalCount - goodCount;
+
+  const { availability, performance, quality, oee } = computeOeeFromTotals({
+    plannedSeconds,
+    operatingSeconds,
+    totalCount,
+    goodCount,
+    idealCycleTime: effectiveIdealCycleTime
+  });
+
+  return {
+    plannedSeconds,
+    operatingSeconds,
+    runningSeconds,
+    stoppedSeconds,
+    noSignalSeconds,
+    breakSeconds,
+    totalDowntimeSeconds,
+    totalCount,
+    goodCount,
+    rejectCount,
+    idealCycleTime: effectiveIdealCycleTime,
+    avgCycleTime: totalCount > 0 ? operatingSeconds / totalCount : 0,
+    availability,
+    performance,
+    quality,
+    oee,
+    downtimeReasons,
+    statusLogs,
+    pulses
+  };
+}
+
+/**
+ * Collapses an array of per-shift rows (same calendar date) into one per-day row, re-deriving
+ * Availability/Performance/Quality/OEE from the summed totals rather than averaging percentages.
+ */
+function collapseByDay(shiftRows) {
+  const byDate = new Map();
+  for (const row of shiftRows) {
+    if (!byDate.has(row.date)) byDate.set(row.date, []);
+    byDate.get(row.date).push(row);
+  }
+
+  const collapsed = [];
+  for (const [date, rows] of byDate) {
+    const sumField = (field) => rows.reduce((s, r) => s + (r[field] || 0), 0);
+    const plannedSeconds = sumField('plannedSeconds');
+    const operatingSeconds = sumField('operatingSeconds');
+    const totalCount = sumField('totalCount');
+    const goodCount = sumField('goodCount');
+    const rejectCount = sumField('rejectCount');
+    const target = sumField('target');
+
+    const idealCycleTimes = [...new Set(rows.map((r) => r.idealCycleTime))];
+    const idealCycleTime = idealCycleTimes.length === 1 ? idealCycleTimes[0] : (totalCount > 0 ? operatingSeconds / totalCount : idealCycleTimes[0]);
+
+    const operators = [...new Set(rows.map((r) => r.operator).filter(Boolean))];
+    const parts = [...new Set(rows.map((r) => r.partName).filter(Boolean))];
+
+    const downtimeReasons = {};
+    rows.forEach((r) => {
+      Object.entries(r.downtimeReasons || {}).forEach(([reason, seconds]) => {
+        downtimeReasons[reason] = (downtimeReasons[reason] || 0) + seconds;
+      });
+    });
+
+    const { availability, performance, quality, oee } = computeOeeFromTotals({
+      plannedSeconds, operatingSeconds, totalCount, goodCount, idealCycleTime
+    });
+
+    collapsed.push({
+      date,
+      shift: rows.length === 1 ? rows[0].shift : 'All Shifts',
+      operator: operators.join(', ') || null,
+      partName: parts.join(', ') || null,
+      target,
+      idealCycleTime: round1(idealCycleTime),
+      plannedSeconds,
+      operatingSeconds,
+      runningSeconds: sumField('runningSeconds'),
+      stoppedSeconds: sumField('stoppedSeconds'),
+      noSignalSeconds: sumField('noSignalSeconds'),
+      breakSeconds: sumField('breakSeconds'),
+      totalDowntimeSeconds: sumField('totalDowntimeSeconds'),
+      totalCount,
+      goodCount,
+      rejectCount,
+      avgCycleTime: totalCount > 0 ? operatingSeconds / totalCount : 0,
+      availability: round1(availability),
+      performance: round1(performance),
+      quality: round1(quality),
+      oee: round1(oee),
+      downtimeReasons
+    });
+  }
+
+  return collapsed.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Recomputes the whole filtered row-set's overall KPI totals (never averages percentages -
+ * always re-derives Availability/Performance/Quality/OEE from the summed seconds/counts).
+ */
+function summarizeKpis(rows, machineId, machineName, startDate, endDate) {
+  const sumField = (field) => rows.reduce((s, r) => s + (r[field] || 0), 0);
+  const plannedSeconds = sumField('plannedSeconds');
+  const operatingSeconds = sumField('operatingSeconds');
+  const totalCount = sumField('totalCount');
+  const goodCount = sumField('goodCount');
+  const rejectCount = sumField('rejectCount');
+  const target = sumField('target');
+  const runningSeconds = sumField('runningSeconds');
+  const stoppedSeconds = sumField('stoppedSeconds');
+  const noSignalSeconds = sumField('noSignalSeconds');
+  const breakSeconds = sumField('breakSeconds');
+  const totalDowntimeSeconds = sumField('totalDowntimeSeconds');
+
+  const idealCycleTimes = [...new Set(rows.map((r) => r.idealCycleTime).filter((v) => v != null))];
+  const idealCycleTime = idealCycleTimes.length === 1
+    ? idealCycleTimes[0]
+    : (totalCount > 0 ? operatingSeconds / totalCount : (idealCycleTimes[0] || 0));
+
+  const { availability, performance, quality, oee } = computeOeeFromTotals({
+    plannedSeconds, operatingSeconds, totalCount, goodCount, idealCycleTime
+  });
+
+  const operatingHours = operatingSeconds / 3600;
+  const actualCycleTime = totalCount > 0 ? operatingSeconds / totalCount : 0;
+
+  return {
+    machineId,
+    machineName,
+    startDate,
+    endDate,
+    plannedProductionSeconds: plannedSeconds,
+    operatingSeconds,
+    runningSeconds,
+    stoppedSeconds,
+    noSignalSeconds,
+    breakSeconds,
+    totalDowntimeSeconds,
+    goodCount,
+    rejectCount,
+    totalCount,
+    target,
+    idealCycleTime: round1(idealCycleTime),
+    avgCycleTime: actualCycleTime,
+    actualCycleTime,
+    availability: round1(availability),
+    performance: round1(performance),
+    quality: round1(quality),
+    oee: round1(oee),
+    machineUtilization: round1(plannedSeconds > 0 ? (operatingSeconds / plannedSeconds) * 100 : 0),
+    productionAchievement: target > 0 ? round1((totalCount / target) * 100) : null,
+    rejectionPercent: totalCount > 0 ? round1((rejectCount / totalCount) * 100) : 0,
+    yieldPercent: totalCount > 0 ? round1((goodCount / totalCount) * 100) : 100,
+    rejectPpm: totalCount > 0 ? Math.round((rejectCount / totalCount) * 1000000) : 0,
+    avgHourlyProduction: operatingHours > 0 ? round1(totalCount / operatingHours) : 0
+  };
+}
+
+/**
+ * Builds the Machine-Wise OEE Report's rows + KPIs for a machine over [startDate, endDate].
+ * Walks every (date, shift) in range, attributes production via part_schedules
+ * (getShiftMeta), computes each shift's metrics (computeWindowMetrics), optionally collapses to
+ * one row per day, and applies operator/part filters. A single-date/single-shift call (as used
+ * by GET /api/reports/oee-detail) is just this same function with startDate === endDate and
+ * shift set - there is no separate calculation path for the drill-down.
+ */
+export async function buildOeeReportRows(machineId, startDate, endDate, { shift, operator, partName, groupBy, includeRaw = false } = {}) {
+  const shiftsToWalk = shift ? [shift] : SHIFT_NAMES;
+  const dates = dateRange(startDate, endDate);
+  const effectiveGroupBy = groupBy === 'day' || groupBy === 'shift' ? groupBy : (dates.length > 1 ? 'day' : 'shift');
+
+  const [machineRows] = await db.query(
+    'SELECT id, name, ideal_cycle_time, assigned_operator FROM machines WHERE id = ?',
+    [machineId]
+  );
+  const machineName = machineRows.length > 0 ? machineRows[0].name : machineId;
+  const machineDefault = machineRows[0] || {};
+
+  const now = Date.now();
+  const rangeStart = getShiftWindow(dates[0], 'Shift C').start;
+  const rangeEnd = new Date(getShiftWindow(dates[dates.length - 1], 'Shift C').start.getTime() + 24 * 3600000);
+
+  // Bulk-prefetch the whole range once on real MySQL instead of querying per (date x shift) -
+  // over a real network connection to the DB host, one round-trip per shift made a 30-day
+  // range take minutes. Mock mode has no network latency to amortize, so it keeps the simpler
+  // per-shift queries (getShiftMeta / computeWindowMetrics's own fetch-by-window fallback).
+  let bulkPulses = null;
+  let bulkStatusLogs = null;
+  let schedulesByShiftKey = null;
+  if (!db.isMock) {
+    bulkPulses = await fetchPulsesInRange(machineId, rangeStart, rangeEnd);
+    bulkStatusLogs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
+    const [scheduleRows] = await db.query(
+      'SELECT * FROM part_schedules WHERE machine_id = ? AND plan_date >= ? AND plan_date <= ? ORDER BY sequence ASC',
+      [machineId, dates[0], dates[dates.length - 1]]
+    );
+    schedulesByShiftKey = new Map();
+    for (const entry of scheduleRows) {
+      const key = `${entry.plan_date}|${entry.shift}`;
+      if (!schedulesByShiftKey.has(key)) schedulesByShiftKey.set(key, []);
+      schedulesByShiftKey.get(key).push(entry);
+    }
+  }
+
+  const shiftRows = [];
+
+  for (const dateStr of dates) {
+    for (const shiftName of shiftsToWalk) {
+      const window = getShiftWindow(dateStr, shiftName);
+      if (window.start.getTime() > now) continue; // future shift - nothing has happened yet
+
+      const meta = schedulesByShiftKey
+        ? deriveShiftMeta(schedulesByShiftKey.get(`${dateStr}|${shiftName}`) || [], machineDefault)
+        : await getShiftMeta(machineId, dateStr, shiftName);
+
+      const metrics = await computeWindowMetrics(machineId, dateStr, window.start, window.end, {
+        idealCycleTime: meta.idealCycleTime,
+        partScheduleIds: meta.scheduled ? meta.partScheduleIds : null,
+        machineIdealCycleTime: machineDefault.ideal_cycle_time,
+        statusLogs: bulkStatusLogs,
+        pulses: bulkPulses
+      });
+
+      // Skip shifts with nothing scheduled and nothing that happened - avoids cluttering the
+      // report with rows for shifts the machine simply wasn't running in.
+      if (!meta.scheduled && metrics.totalCount === 0 && metrics.totalDowntimeSeconds === 0) continue;
+
+      if (operator && meta.operator !== operator) continue;
+      if (partName && meta.partName !== partName) continue;
+
+      const row = {
+        date: dateStr,
+        shift: shiftName,
+        operator: meta.operator,
+        partName: meta.partName,
+        target: meta.target,
+        ...metrics
+      };
+      if (!includeRaw) {
+        delete row.statusLogs;
+        delete row.pulses;
+      }
+      shiftRows.push(row);
+    }
+  }
+
+  const rows = effectiveGroupBy === 'day' ? collapseByDay(shiftRows) : shiftRows;
+  const kpis = summarizeKpis(rows, machineId, machineName, startDate, endDate);
+
+  return { machineId, machineName, startDate, endDate, groupBy: effectiveGroupBy, kpis, rows };
+}
+
+/**
+ * Groups a flat downtime event list by day/shift/week/month for the Downtime Analysis table.
+ */
+function groupDowntimeEvents(events, groupBy) {
+  const keyFor = (e) => {
+    if (groupBy === 'shift') return `${e.date}|${e.shift}`;
+    if (groupBy === 'week') return isoWeekKey(e.date);
+    if (groupBy === 'month') return e.date.slice(0, 7);
+    return e.date;
+  };
+
+  const groups = new Map();
+  for (const event of events) {
+    const key = keyFor(event);
+    if (!groups.has(key)) {
+      groups.set(key, { key, date: event.date, shift: groupBy === 'shift' ? event.shift : null, totalDowntimeSeconds: 0, events: 0 });
+    }
+    const g = groups.get(key);
+    g.totalDowntimeSeconds += event.durationSeconds;
+    g.events += 1;
+  }
+  return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/**
+ * Builds the Downtime Analysis module's flat event list, grouped totals, and headline KPIs for
+ * a machine over [startDate, endDate]. status_before/status_after are read off the neighboring
+ * status_logs rows for the same machine - safe because ensureActiveStatusLog() (mqttService.js)
+ * guarantees at most one open log per machine at any time, so Stopped rows are always bounded
+ * by a Running/No Signal row on each side.
+ */
+export async function buildDowntimeReport(machineId, startDate, endDate, groupBy = 'day') {
+  const dates = dateRange(startDate, endDate);
+  const rangeStart = getShiftWindow(dates[0], 'Shift C').start;
+  const rangeEnd = new Date(getShiftWindow(dates[dates.length - 1], 'Shift C').start.getTime() + 24 * 3600000);
+
+  const [machineRows] = await db.query('SELECT id, name FROM machines WHERE id = ?', [machineId]);
+  const machineName = machineRows.length > 0 ? machineRows[0].name : machineId;
+
+  const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
+  const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+
+  const events = allSorted
+    .filter((log) => log.status === 'Stopped')
+    .map((log) => {
+      const idx = allSorted.findIndex((l) => l.id === log.id);
+      const before = idx > 0 ? allSorted[idx - 1].status : null;
+      const after = idx >= 0 && idx < allSorted.length - 1 ? allSorted[idx + 1].status : null;
+      const start = new Date(log.start_time);
+      const end = log.end_time ? new Date(log.end_time) : new Date();
+      const durationSeconds = Math.max(0, (end.getTime() - start.getTime()) / 1000);
+      const reason = log.downtime_reason || 'Other';
+
+      return {
+        id: log.id,
+        date: toDateOnlyString(start),
+        shift: getShiftForTimestamp(start),
+        startTime: log.start_time,
+        endTime: log.end_time,
+        durationSeconds,
+        reason,
+        category: PLANNED_REASONS.has(reason) ? 'Planned' : 'Unplanned',
+        operator: log.operator_id,
+        partNumber: log.part_name,
+        statusBefore: before,
+        statusAfter: after,
+        remarks: null
+      };
+    });
+
+  const groups = groupDowntimeEvents(events, groupBy);
+
+  const totalDowntimeSeconds = events.reduce((s, e) => s + e.durationSeconds, 0);
+  const plannedDowntimeSeconds = events.filter((e) => e.category === 'Planned').reduce((s, e) => s + e.durationSeconds, 0);
+  const unplannedDowntimeSeconds = totalDowntimeSeconds - plannedDowntimeSeconds;
+
+  const totalPlannedProductionSeconds = dates.reduce((sum, dateStr) => {
+    const midnight = getShiftWindow(dateStr, 'Shift C').start;
+    const breaks = getPlannedBreaks(midnight);
+    const breakSeconds = breaks.reduce((s, b) => s + (b.end.getTime() - b.start.getTime()) / 1000, 0);
+    return sum + (86400 - breakSeconds);
+  }, 0);
+
+  const kpis = {
+    totalDowntimeSeconds,
+    plannedDowntimeSeconds,
+    unplannedDowntimeSeconds,
+    downtimePercent: totalPlannedProductionSeconds > 0 ? round1((totalDowntimeSeconds / totalPlannedProductionSeconds) * 100) : 0,
+    totalEvents: events.length,
+    avgDowntimeSeconds: events.length > 0 ? Math.round(totalDowntimeSeconds / events.length) : 0,
+    longestDowntimeSeconds: events.length > 0 ? Math.max(...events.map((e) => e.durationSeconds)) : 0
+  };
+
+  return { machineId, machineName, startDate, endDate, groupBy, kpis, groups, events };
+}

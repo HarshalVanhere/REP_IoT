@@ -74,6 +74,12 @@ async function setup() {
     } catch (err) {
       // Ignore if column already exists
     }
+    try {
+      await connection.query('ALTER TABLE pulses ADD INDEX idx_pulses_machine_timestamp (machine_id, timestamp)');
+      console.log('   + Added index "idx_pulses_machine_timestamp" to pulses table');
+    } catch (err) {
+      // Ignore if index already exists
+    }
 
     // Create status_logs table
     console.log('🛠️  Creating "status_logs" table...');
@@ -96,6 +102,12 @@ async function setup() {
       console.log('   + Added "synced" column to status_logs table');
     } catch (err) {
       // Ignore if column already exists
+    }
+    try {
+      await connection.query('ALTER TABLE status_logs ADD INDEX idx_status_logs_machine_start (machine_id, start_time)');
+      console.log('   + Added index "idx_status_logs_machine_start" to status_logs table');
+    } catch (err) {
+      // Ignore if index already exists
     }
 
     // Create users table

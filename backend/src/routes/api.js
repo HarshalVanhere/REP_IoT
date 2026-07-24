@@ -8,9 +8,10 @@ import { resetProductionCounters } from '../services/productionRecordService.js'
 import { requireAuth, requireRole, requireSyncKey } from '../middleware/auth.js';
 import { recordAuditLog } from '../utils/auditLog.js';
 import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
-import { getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
+import { getShiftForTimestamp, toDateOnlyString, SHIFT_NAMES } from '../config/shifts.js';
 import { logger } from '../utils/logger.js';
 import { withMachineLock } from '../utils/machineLock.js';
+import { buildOeeReportRows, buildDowntimeReport } from '../services/reportingService.js';
 
 const router = express.Router();
 
@@ -262,6 +263,122 @@ router.get('/reports/production-summary', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error('API Error: GET /reports/production-summary:', err.message);
     res.status(500).json({ error: 'Failed to retrieve production summary' });
+  }
+});
+
+/**
+ * GET /api/reports/oee-summary?machineId&startDate&endDate&shift&operator&partName&groupBy
+ * Machine-Wise OEE Report: historical Availability/Performance/Quality/OEE (and the expanded
+ * KPI set) for an arbitrary date range, optionally scoped to a shift/operator/part. Reuses the
+ * exact same formula helpers as the live dashboard (see reportingService.js/oeeCalculator.js) -
+ * there is only one OEE calculation in this codebase.
+ */
+router.get('/reports/oee-summary', requireAuth, async (req, res) => {
+  const { machineId, startDate, endDate, shift, operator, partName, groupBy } = req.query;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!machineId) {
+    return res.status(400).json({ error: 'machineId is required' });
+  }
+  if (!startDate || !endDate || !DATE_RE.test(startDate) || !DATE_RE.test(endDate)) {
+    return res.status(400).json({ error: 'Valid startDate and endDate query params (YYYY-MM-DD) are required' });
+  }
+  if (startDate > endDate) {
+    return res.status(400).json({ error: 'startDate must not be after endDate' });
+  }
+  if (shift && !SHIFT_NAMES.includes(shift)) {
+    return res.status(400).json({ error: `shift must be one of: ${SHIFT_NAMES.join(', ')}` });
+  }
+
+  try {
+    const [machines] = await db.query('SELECT id FROM machines WHERE id = ?', [machineId]);
+    if (machines.length === 0) {
+      return res.status(404).json({ error: `Machine ${machineId} not found` });
+    }
+
+    const report = await buildOeeReportRows(machineId, startDate, endDate, {
+      shift: shift || null,
+      operator: operator || null,
+      partName: partName || null,
+      groupBy: groupBy || null
+    });
+
+    res.json(report);
+  } catch (err) {
+    logger.error('API Error: GET /reports/oee-summary:', err.message);
+    res.status(500).json({ error: 'Failed to build OEE report' });
+  }
+});
+
+/**
+ * GET /api/reports/downtime-summary?machineId&startDate&endDate&groupBy
+ * Downtime Analysis module: KPIs, grouped totals (day/shift/week/month), and the full flat
+ * event list for a machine over a date range. The frontend filters `events` client-side per
+ * group for the "Total Downtime" click-through popup, instead of a separate endpoint.
+ */
+router.get('/reports/downtime-summary', requireAuth, async (req, res) => {
+  const { machineId, startDate, endDate, groupBy } = req.query;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!machineId) {
+    return res.status(400).json({ error: 'machineId is required' });
+  }
+  if (!startDate || !endDate || !DATE_RE.test(startDate) || !DATE_RE.test(endDate)) {
+    return res.status(400).json({ error: 'Valid startDate and endDate query params (YYYY-MM-DD) are required' });
+  }
+  if (startDate > endDate) {
+    return res.status(400).json({ error: 'startDate must not be after endDate' });
+  }
+  const effectiveGroupBy = ['day', 'shift', 'week', 'month'].includes(groupBy) ? groupBy : 'day';
+
+  try {
+    const [machines] = await db.query('SELECT id FROM machines WHERE id = ?', [machineId]);
+    if (machines.length === 0) {
+      return res.status(404).json({ error: `Machine ${machineId} not found` });
+    }
+
+    const report = await buildDowntimeReport(machineId, startDate, endDate, effectiveGroupBy);
+    res.json(report);
+  } catch (err) {
+    logger.error('API Error: GET /reports/downtime-summary:', err.message);
+    res.status(500).json({ error: 'Failed to build downtime report' });
+  }
+});
+
+/**
+ * GET /api/reports/oee-detail?machineId&date&shift
+ * "View Details" drill-down for one (machine, date, shift) - a single-row call into the exact
+ * same buildOeeReportRows() used by /reports/oee-summary (includeRaw=true so the raw pulses/
+ * statusLogs come along for the cycle-time trend, hourly production, reject history, and
+ * status/downtime timeline). No separate calculation path.
+ */
+router.get('/reports/oee-detail', requireAuth, async (req, res) => {
+  const { machineId, date, shift } = req.query;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!machineId) {
+    return res.status(400).json({ error: 'machineId is required' });
+  }
+  if (!date || !DATE_RE.test(date)) {
+    return res.status(400).json({ error: 'A valid date query param (YYYY-MM-DD) is required' });
+  }
+  if (!shift || !SHIFT_NAMES.includes(shift)) {
+    return res.status(400).json({ error: `shift must be one of: ${SHIFT_NAMES.join(', ')}` });
+  }
+
+  try {
+    const [machines] = await db.query('SELECT id FROM machines WHERE id = ?', [machineId]);
+    if (machines.length === 0) {
+      return res.status(404).json({ error: `Machine ${machineId} not found` });
+    }
+
+    const report = await buildOeeReportRows(machineId, date, date, { shift, groupBy: 'shift', includeRaw: true });
+    const row = report.rows[0] || null;
+
+    res.json({ machineId, machineName: report.machineName, date, shift, row });
+  } catch (err) {
+    logger.error('API Error: GET /reports/oee-detail:', err.message);
+    res.status(500).json({ error: 'Failed to build OEE detail' });
   }
 });
 
