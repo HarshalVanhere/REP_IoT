@@ -120,7 +120,7 @@ export function getPlannedProductionSeconds(now) {
 /**
  * Calculates overlap in seconds between two date intervals
  */
-function getIntervalOverlapSeconds(start1, end1, start2, end2) {
+export function getIntervalOverlapSeconds(start1, end1, start2, end2) {
   const s = Math.max(start1.getTime(), start2.getTime());
   const e = Math.min(end1.getTime(), end2.getTime());
   return Math.max(0, (e - s) / 1000);

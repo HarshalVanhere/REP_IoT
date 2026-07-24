@@ -1,6 +1,6 @@
 import db from '../config/db.js';
 import { SHIFT_NAMES, getShiftWindow, getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
-import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals } from './oeeCalculator.js';
+import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getIntervalOverlapSeconds } from './oeeCalculator.js';
 
 // Downtime reasons treated as "Planned" for the Downtime Analysis module's Planned/Unplanned
 // split - everything else in PREDEFINED_REASONS (config/reasonCodes.js) is Unplanned.
@@ -485,7 +485,28 @@ function groupDowntimeEvents(events, groupBy) {
  * guarantees at most one open log per machine at any time, so Stopped rows are always bounded
  * by a Running/No Signal row on each side.
  */
-export async function buildDowntimeReport(machineId, startDate, endDate, groupBy = 'day') {
+/**
+ * Planned production seconds for one calendar date - the whole day (minus that day's breaks)
+ * when no shift filter is applied, or just that one shift's window (minus its own breaks) when
+ * `shift` is given. Used as the Downtime % denominator so filtering by shift doesn't compare a
+ * single shift's downtime against a whole day's planned time.
+ */
+function plannedSecondsForDate(dateStr, shift) {
+  const midnight = getShiftWindow(dateStr, 'Shift C').start;
+  const breaks = getPlannedBreaks(midnight);
+
+  if (shift) {
+    const window = getShiftWindow(dateStr, shift);
+    const windowSeconds = (window.end.getTime() - window.start.getTime()) / 1000;
+    const breakSeconds = breaks.reduce((s, b) => s + getIntervalOverlapSeconds(window.start, window.end, b.start, b.end), 0);
+    return windowSeconds - breakSeconds;
+  }
+
+  const breakSeconds = breaks.reduce((s, b) => s + (b.end.getTime() - b.start.getTime()) / 1000, 0);
+  return 86400 - breakSeconds;
+}
+
+export async function buildDowntimeReport(machineId, startDate, endDate, groupBy = 'day', { shift, operator, partName } = {}) {
   const dates = dateRange(startDate, endDate);
   const rangeStart = getShiftWindow(dates[0], 'Shift C').start;
   const rangeEnd = new Date(getShiftWindow(dates[dates.length - 1], 'Shift C').start.getTime() + 24 * 3600000);
@@ -496,7 +517,7 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
   const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
   const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
 
-  const events = allSorted
+  const allEvents = allSorted
     .filter((log) => log.status === 'Stopped')
     .map((log) => {
       const idx = allSorted.findIndex((l) => l.id === log.id);
@@ -524,18 +545,23 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
       };
     });
 
+  // Applied AFTER the before/after neighbor lookup above (which needs the full, unfiltered
+  // sequence of logs to correctly identify what status the machine was in immediately before/
+  // after each downtime event) - filtering the raw logs first would corrupt that neighbor lookup.
+  const events = allEvents.filter((e) => {
+    if (shift && e.shift !== shift) return false;
+    if (operator && e.operator !== operator) return false;
+    if (partName && e.partNumber !== partName) return false;
+    return true;
+  });
+
   const groups = groupDowntimeEvents(events, groupBy);
 
   const totalDowntimeSeconds = events.reduce((s, e) => s + e.durationSeconds, 0);
   const plannedDowntimeSeconds = events.filter((e) => e.category === 'Planned').reduce((s, e) => s + e.durationSeconds, 0);
   const unplannedDowntimeSeconds = totalDowntimeSeconds - plannedDowntimeSeconds;
 
-  const totalPlannedProductionSeconds = dates.reduce((sum, dateStr) => {
-    const midnight = getShiftWindow(dateStr, 'Shift C').start;
-    const breaks = getPlannedBreaks(midnight);
-    const breakSeconds = breaks.reduce((s, b) => s + (b.end.getTime() - b.start.getTime()) / 1000, 0);
-    return sum + (86400 - breakSeconds);
-  }, 0);
+  const totalPlannedProductionSeconds = dates.reduce((sum, dateStr) => sum + plannedSecondsForDate(dateStr, shift), 0);
 
   const kpis = {
     totalDowntimeSeconds,
@@ -547,5 +573,5 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
     longestDowntimeSeconds: events.length > 0 ? Math.max(...events.map((e) => e.durationSeconds)) : 0
   };
 
-  return { machineId, machineName, startDate, endDate, groupBy, kpis, groups, events };
+  return { machineId, machineName, startDate, endDate, groupBy, shift: shift || null, operator: operator || null, partName: partName || null, kpis, groups, events };
 }

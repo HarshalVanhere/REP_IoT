@@ -31,42 +31,7 @@ export default function OperatorTerminal({
     return window.localStorage.getItem('mes-logged-operator') || '';
   });
 
-  const [loginTime, setLoginTime] = useState(() => {
-    const saved = window.localStorage.getItem('mes-login-time');
-    return saved ? parseInt(saved, 10) : null;
-  });
-
-  const [dutyTimeStr, setDutyTimeStr] = useState('00h 00m');
-
-  useEffect(() => {
-    if (loggedInOperator) {
-      if (!loginTime) {
-        const now = Date.now();
-        setLoginTime(now);
-        window.localStorage.setItem('mes-login-time', now.toString());
-      }
-    } else {
-      setLoginTime(null);
-      window.localStorage.removeItem('mes-login-time');
-    }
-  }, [loggedInOperator, loginTime]);
-
-  useEffect(() => {
-    if (!loginTime) {
-      setDutyTimeStr('00h 00m');
-      return;
-    }
-    const updateDutyTime = () => {
-      const diffMs = Date.now() - loginTime;
-      const totalSecs = Math.floor(diffMs / 1000);
-      const hours = Math.floor(totalSecs / 3600);
-      const mins = Math.floor((totalSecs % 3600) / 60);
-      setDutyTimeStr(`${hours.toString().padStart(2, '0')}h ${mins.toString().padStart(2, '0')}m`);
-    };
-    updateDutyTime();
-    const interval = setInterval(updateDutyTime, 10000); // update every 10 seconds
-    return () => clearInterval(interval);
-  }, [loginTime]);
+  const [shiftRemainingStr, setShiftRemainingStr] = useState('');
 
   // Find active selected machine
   const machine = machines.find(m => m.id === selectedId) || {};
@@ -76,6 +41,42 @@ export default function OperatorTerminal({
   // No part scheduled for this machine right now - production must never start (or continue
   // showing a stale previous part) without PPC creating and activating a real schedule entry.
   const hasSchedule = Boolean(active_schedule_id);
+
+  // Shift & Duty card: counts down to the end of the CURRENT shift (from the plant's fixed
+  // shift schedule - same 07:00/15:30/24:00 boundaries used elsewhere in this dashboard), not
+  // how long the operator has been logged in. `currentShift` comes from the backend's
+  // getShiftForTimestamp(now) (see calculateOEE), so once real time crosses into the next
+  // shift the next machines poll flips currentShift forward on its own and this countdown
+  // restarts for the new shift - no separate "next shift" lookup needed here.
+  useEffect(() => {
+    const SHIFT_END_MINUTES = { 'Shift A': 15.5 * 60, 'Shift B': 24 * 60, 'Shift C': 7 * 60 };
+
+    const update = () => {
+      const endMinutes = SHIFT_END_MINUTES[currentShift] ?? SHIFT_END_MINUTES['Shift A'];
+      const now = new Date();
+      const startOfDay = new Date(now);
+      startOfDay.setHours(0, 0, 0, 0);
+      let shiftEnd = new Date(startOfDay.getTime() + endMinutes * 60000);
+      if (shiftEnd.getTime() <= now.getTime()) {
+        shiftEnd = new Date(shiftEnd.getTime() + 24 * 3600000);
+      }
+
+      const remainingMs = shiftEnd.getTime() - now.getTime();
+      if (remainingMs <= 0) {
+        setShiftRemainingStr('SHIFT COMPLETED');
+        return;
+      }
+      const totalSecs = Math.floor(remainingMs / 1000);
+      const hh = Math.floor(totalSecs / 3600);
+      const mm = Math.floor((totalSecs % 3600) / 60);
+      const ss = totalSecs % 60;
+      setShiftRemainingStr(`${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`);
+    };
+
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [currentShift]);
 
   useEffect(() => {
     setShowManualLogin(false);
@@ -392,9 +393,16 @@ export default function OperatorTerminal({
                     <Calendar className="w-5 h-5 text-violet-400 shrink-0" />
                     <span className="text-lg font-black text-white font-mono uppercase leading-none">{currentShift}</span>
                   </div>
-                  <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
-                    <Clock className="w-5 h-5 text-sky-400 shrink-0" />
-                    <span className="text-lg font-black text-white font-mono uppercase leading-none">{dutyTimeStr}</span>
+                  <div className="w-full flex flex-col items-center justify-center gap-1 py-1.5">
+                    <div className="flex items-center gap-2.5">
+                      <Clock className="w-5 h-5 text-sky-400 shrink-0" />
+                      <span className={`text-lg font-black font-mono uppercase leading-none ${shiftRemainingStr === 'SHIFT COMPLETED' ? 'text-amber-400' : 'text-white'}`}>
+                        {shiftRemainingStr}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none">
+                      {shiftRemainingStr === 'SHIFT COMPLETED' ? 'Awaiting Next Shift' : 'Shift Ends In'}
+                    </span>
                   </div>
                   <div className="w-full flex items-center justify-center gap-2.5 py-1.5">
                     <Package className="w-5 h-5 text-emerald-400 shrink-0" />

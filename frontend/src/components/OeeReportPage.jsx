@@ -191,6 +191,10 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
     setDowntimeLoading(true);
 
     const params = new URLSearchParams({ machineId, startDate, endDate, groupBy: downtimeGroupBy });
+    if (shift !== 'All Shifts') params.set('shift', shift);
+    if (operator !== 'All Operators') params.set('operator', operator);
+    if (partName !== 'All Parts') params.set('partName', partName);
+
     apiFetch(`/api/reports/downtime-summary?${params.toString()}`, { token: authToken })
       .then((data) => { if (!cancelled) setDowntimeReport(data); })
       .catch((err) => {
@@ -201,7 +205,7 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machineId, startDate, endDate, downtimeGroupBy, tab, authToken]);
+  }, [machineId, startDate, endDate, shift, operator, partName, downtimeGroupBy, tab, authToken]);
 
   const rows = report?.rows || [];
   const kpis = report?.kpis || null;

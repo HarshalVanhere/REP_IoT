@@ -311,13 +311,14 @@ router.get('/reports/oee-summary', requireAuth, async (req, res) => {
 });
 
 /**
- * GET /api/reports/downtime-summary?machineId&startDate&endDate&groupBy
+ * GET /api/reports/downtime-summary?machineId&startDate&endDate&groupBy&shift&operator&partName
  * Downtime Analysis module: KPIs, grouped totals (day/shift/week/month), and the full flat
- * event list for a machine over a date range. The frontend filters `events` client-side per
- * group for the "Total Downtime" click-through popup, instead of a separate endpoint.
+ * event list for a machine over a date range, optionally scoped to a shift/operator/part. The
+ * frontend filters `events` client-side per group for the "Total Downtime" click-through popup,
+ * instead of a separate endpoint.
  */
 router.get('/reports/downtime-summary', requireAuth, async (req, res) => {
-  const { machineId, startDate, endDate, groupBy } = req.query;
+  const { machineId, startDate, endDate, groupBy, shift, operator, partName } = req.query;
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
   if (!machineId) {
@@ -329,6 +330,9 @@ router.get('/reports/downtime-summary', requireAuth, async (req, res) => {
   if (startDate > endDate) {
     return res.status(400).json({ error: 'startDate must not be after endDate' });
   }
+  if (shift && !SHIFT_NAMES.includes(shift)) {
+    return res.status(400).json({ error: `shift must be one of: ${SHIFT_NAMES.join(', ')}` });
+  }
   const effectiveGroupBy = ['day', 'shift', 'week', 'month'].includes(groupBy) ? groupBy : 'day';
 
   try {
@@ -337,7 +341,11 @@ router.get('/reports/downtime-summary', requireAuth, async (req, res) => {
       return res.status(404).json({ error: `Machine ${machineId} not found` });
     }
 
-    const report = await buildDowntimeReport(machineId, startDate, endDate, effectiveGroupBy);
+    const report = await buildDowntimeReport(machineId, startDate, endDate, effectiveGroupBy, {
+      shift: shift || null,
+      operator: operator || null,
+      partName: partName || null
+    });
     res.json(report);
   } catch (err) {
     logger.error('API Error: GET /reports/downtime-summary:', err.message);

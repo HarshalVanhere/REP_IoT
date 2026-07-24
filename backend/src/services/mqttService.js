@@ -218,25 +218,53 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
   // 2. Update machine status in database
   await db.query("UPDATE machines SET status = 'Running' WHERE id = ?", [machineId]);
 
-  // 3. Close the active status log (usually Stopped) and set its downtime_reason
+  // 3. Set the downtime_reason on the Stopped log this resume is actually closing out.
+  // IMPORTANT: target it by id (most recent 'Stopped' row for this machine), not by
+  // "whichever log currently has end_time IS NULL". On a real Edge Gateway, the ESP32 sends its
+  // own "status":"Running" telemetry immediately after the resume command - BEFORE it sends the
+  // ack this route is awaiting (see firmware/esp32_cnc_monitor.ino's resume handler) - and that
+  // telemetry independently races in via handleStatusMessage -> ensureActiveStatusLog, which
+  // closes the open Stopped log with NO reason. If this function then matched "end_time IS
+  // NULL" it would find only the *new* Running row that race just opened, and would tag the
+  // operator's reason onto that Running-status row instead - permanently losing it, since the
+  // real Stopped row it belonged to would already be closed with downtime_reason left NULL.
+  // Matching on status='Stopped' instead makes this correct regardless of which side of that
+  // race actually gets there first.
+  const [machineLogs] = await db.query('SELECT * FROM status_logs WHERE machine_id = ?', [machineId]);
+  const stoppedLog = machineLogs
+    .filter((l) => l.status === 'Stopped')
+    .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))[0];
+
+  if (stoppedLog) {
+    // Preserve the existing end_time if the race above already closed it out; otherwise this
+    // resume is what closes it, so stamp it with "now".
+    const resolvedEndTime = stoppedLog.end_time || timestamp;
+    await db.query(
+      'UPDATE status_logs SET end_time = ?, downtime_reason = ?, synced = FALSE WHERE id = ?',
+      [resolvedEndTime, reason, stoppedLog.id]
+    );
+  }
+
+  // Close out any OTHER still-open log for this machine (e.g. a Running row the race above
+  // already created) without touching its reason - Running periods never have a downtime
+  // reason. Close EVERY such log, not just the first found - a resume racing the ESP32's own
+  // immediate status telemetry (both independently touch status_logs with no locking between
+  // them) can leave more than one open row; closing only one lets the rest live open forever,
+  // and the watchdog's LEFT JOIN against status_logs then matches one result row per stray
+  // duplicate, misfiring its stale-pulse check once per duplicate.
   const [activeLogs] = await db.query(
     'SELECT * FROM status_logs WHERE machine_id = ? AND end_time IS NULL',
     [machineId]
   );
 
   if (activeLogs.length > 0) {
-    // Close EVERY open log for this machine, not just the first one found - a resume racing
-    // the ESP32's own immediate status telemetry (both independently touch status_logs with
-    // no locking between them) can leave more than one open row. Closing only one lets the
-    // rest live open forever, and the watchdog's LEFT JOIN against status_logs then matches
-    // one result row per stray duplicate, misfiring its stale-pulse check once per duplicate.
     // Reset synced=FALSE: this may have already been uploaded to the cloud while it was
     // still open (no reason yet) - without this, the sync client's "WHERE synced = 0" query
     // never picks the row up again, and the downtime reason/end_time silently never reaches
     // the cloud dashboard.
     await db.query(
-      'UPDATE status_logs SET end_time = ?, downtime_reason = ?, synced = FALSE WHERE machine_id = ? AND end_time IS NULL',
-      [timestamp, reason, machineId]
+      'UPDATE status_logs SET end_time = ?, synced = FALSE WHERE machine_id = ? AND end_time IS NULL',
+      [timestamp, machineId]
     );
   }
 
