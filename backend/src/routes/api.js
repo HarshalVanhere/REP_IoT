@@ -667,14 +667,6 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
             log.part_name
           ]
         );
-
-        // Update the machine's current status if this log is active (end_time is null) or newer
-        if (!endTime) {
-          await connection.query(
-            'UPDATE machines SET status = ? WHERE id = ?',
-            [log.status, log.machine_id]
-          );
-        }
       } else {
         // If it exists but end_time is now closed, update it
         if (endTime) {
@@ -683,6 +675,23 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
             [endTime, log.downtime_reason, existing[0].id]
           );
         }
+      }
+    }
+
+    // Set each affected machine's current status from whichever status_logs row is
+    // chronologically latest, rather than only reacting to rows that happen to still be open
+    // at upload time. The gateway's 5-second sync loop can easily batch a status transition
+    // that's already closed by the time it uploads (two quick transitions inside one window),
+    // which used to leave machines.status stuck on a stale value indefinitely - deriving it
+    // from the latest row after every batch is self-correcting regardless of that timing race.
+    const machinesWithStatusLogs = new Set(statusLogs.map((l) => l.machine_id));
+    for (const machineId of machinesWithStatusLogs) {
+      const [[latest]] = await connection.query(
+        'SELECT status FROM status_logs WHERE machine_id = ? ORDER BY start_time DESC, id DESC LIMIT 1',
+        [machineId]
+      );
+      if (latest) {
+        await connection.query('UPDATE machines SET status = ? WHERE id = ?', [latest.status, machineId]);
       }
     }
 
