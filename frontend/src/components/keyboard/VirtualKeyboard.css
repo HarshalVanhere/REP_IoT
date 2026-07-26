@@ -1,0 +1,103 @@
+/* On-screen keyboard for the Operator Login screen only - this file is imported exclusively by
+   VirtualKeyboard.jsx, which is lazy-loaded and mounted only while LoginScreen is on screen, so
+   none of this ships to (or affects) the dashboard. Dark industrial theme, large touch targets
+   for gloved operators, tuned for an 800x480 kiosk panel. */
+
+.virtual-keyboard-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: #0b1220;
+  border-top: 2px solid var(--primary);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+  transform: translateY(100%);
+  transition: transform 220ms ease-out;
+  touch-action: manipulation;
+  pointer-events: none;
+}
+
+.virtual-keyboard-dock.is-open {
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.virtual-keyboard-inner {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* --- react-simple-keyboard theme overrides --- */
+.kiosk-keyboard-theme.hg-theme-default {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+}
+
+.kiosk-keyboard-theme .hg-row {
+  display: flex;
+  margin-bottom: 6px;
+}
+
+.kiosk-keyboard-theme .hg-row:last-child {
+  margin-bottom: 0;
+}
+
+.kiosk-keyboard-theme .hg-button {
+  height: 56px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  border-radius: 10px;
+  background: #1e293b;
+  color: #f8fafc;
+  border: 1px solid #334155;
+  font-size: 18px;
+  font-weight: 700;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.3);
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background 100ms ease, transform 60ms ease;
+}
+
+.kiosk-keyboard-theme .hg-row .hg-button:last-child {
+  margin-right: 0;
+}
+
+.kiosk-keyboard-theme .hg-button:active {
+  background: var(--primary);
+  border-color: var(--primary);
+  transform: translateY(1px);
+}
+
+.kiosk-keyboard-theme .hg-button.kb-key-wide {
+  flex-grow: 2;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.kiosk-keyboard-theme .hg-button[data-skbtn='{space}'] {
+  flex-grow: 6;
+}
+
+.kiosk-keyboard-theme .hg-button[data-skbtn='{hide}'] {
+  flex-grow: 3;
+  background: #334155;
+}
+
+.kiosk-keyboard-theme .hg-button.kb-key-active {
+  background: var(--secondary1) !important;
+  border-color: var(--secondary1) !important;
+  color: #0f172a !important;
+}
+
+@media (max-height: 520px) {
+  .kiosk-keyboard-theme .hg-button {
+    height: 50px;
+    font-size: 16px;
+  }
+}

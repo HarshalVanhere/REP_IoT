@@ -1,14 +1,52 @@
-import React, { useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, Factory, Lock, LogIn, MoonStar, SunMedium, ShieldAlert, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import { useVirtualKeyboard } from './keyboard/useVirtualKeyboard';
 import jbmLogo from '../assets/jbmlogo (1).png';
 import roseLogo from '../assets/rose logo (1).png';
+
+// Lazy-loaded so the on-screen keyboard (and react-simple-keyboard) is only ever fetched/parsed
+// while the Login screen is mounted - it never ships as part of the dashboard bundle, and it
+// unmounts along with LoginScreen the moment login succeeds.
+const VirtualKeyboard = lazy(() => import('./keyboard/VirtualKeyboard.jsx'));
 
 export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }) {
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const { activeInput, isOpen: isKeyboardOpen, open: openKeyboard, close: closeKeyboard } = useVirtualKeyboard();
+  const formRef = useRef(null);
+  const cardRef = useRef(null);
+
+  // Warm the keyboard chunk as soon as the Login screen mounts (not on first focus), so the very
+  // first tap into a field opens it without a visible load delay - the import is still only ever
+  // triggered from this screen.
+  useEffect(() => {
+    import('./keyboard/VirtualKeyboard.jsx');
+  }, []);
+
+  // Tapping anywhere outside the login card (background, theme toggle) hides the keyboard.
+  // Taps inside the card - including switching between fields, which re-opens via onFocus -
+  // are left alone.
+  useEffect(() => {
+    if (!isKeyboardOpen) return undefined;
+    const handlePointerDown = (event) => {
+      const insideCard = cardRef.current?.contains(event.target);
+      const insideKeyboard = event.target.closest?.('.virtual-keyboard-dock');
+      if (!insideCard && !insideKeyboard) {
+        closeKeyboard();
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
+  }, [isKeyboardOpen, closeKeyboard]);
+
+  const handleFieldChange = useCallback((name, value) => {
+    if (name === 'loginId') setLoginId(value.toUpperCase());
+    else if (name === 'password') setPassword(value);
+  }, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -25,6 +63,7 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
         method: 'POST',
         body: { loginId: loginId.trim(), password }
       });
+      closeKeyboard();
       onLoginSuccess(data.user, data.token);
     } catch (err) {
       setErrorMessage(err.message || 'Login failed. Please try again.');
@@ -32,6 +71,14 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
       setIsSubmitting(false);
     }
   };
+
+  const requestSubmit = useCallback(() => {
+    formRef.current?.requestSubmit();
+  }, []);
+
+  const keyboardShiftClass = isKeyboardOpen
+    ? (activeInput === 'password' ? '-translate-y-[110px]' : '-translate-y-[60px]')
+    : 'translate-y-0';
 
   return (
     <div className="min-h-screen flex flex-col justify-center items-center p-4 font-sans select-none bg-[var(--bg-color-page)] relative overflow-hidden transition-all duration-300">
@@ -51,7 +98,10 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
         </button>
       </div>
 
-      <div className="w-full max-w-[900px] grid lg:grid-cols-[1.1fr_0.9fr] jbm-card overflow-hidden shadow-xl animate-in fade-in duration-300">
+      <div
+        ref={cardRef}
+        className={`w-full max-w-[900px] grid lg:grid-cols-[1.1fr_0.9fr] jbm-card overflow-hidden shadow-xl animate-in fade-in duration-300 transition-transform duration-300 ease-out ${keyboardShiftClass}`}
+      >
 
         {/* Left Side: Brand Promo / Info Panel */}
         <div className="bg-[var(--secondary2-trans-100)] p-8 flex flex-col justify-between border-r-[1.5px] border-[var(--grey-200)]">
@@ -105,7 +155,7 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
               </div>
             </div>
 
-            <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+            <form ref={formRef} onSubmit={handleSubmit} className="mt-6 space-y-4">
               <div>
                 <label className="mb-1.5 block text-[9.5px] font-extrabold uppercase tracking-widest text-slate-450">Login ID</label>
                 <div className="relative">
@@ -113,9 +163,11 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
                   <input
                     type="text"
                     value={loginId}
-                    onChange={(e) => setLoginId(e.target.value.toUpperCase())}
+                    onChange={(e) => handleFieldChange('loginId', e.target.value)}
+                    onFocus={() => openKeyboard('loginId')}
                     placeholder="e.g. ADMIN, SUP-201"
                     autoComplete="username"
+                    inputMode="text"
                     className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] hover:border-[var(--primary)] focus:border-[var(--primary)] focus:bg-[var(--white-color)] text-[var(--grey-900)] rounded-xl py-2.5 pl-9 pr-3 text-xs font-bold uppercase transition-all outline-none"
                   />
                 </div>
@@ -128,9 +180,11 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
                   <input
                     type="password"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => handleFieldChange('password', e.target.value)}
+                    onFocus={() => openKeyboard('password')}
                     placeholder="Enter your password"
                     autoComplete="current-password"
+                    inputMode="text"
                     className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] hover:border-[var(--primary)] focus:border-[var(--primary)] focus:bg-[var(--white-color)] text-[var(--grey-900)] rounded-xl py-2.5 pl-9 pr-3 text-xs font-bold transition-all outline-none"
                   />
                 </div>
@@ -160,6 +214,17 @@ export default function LoginScreen({ themeMode, onToggleTheme, onLoginSuccess }
         </div>
 
       </div>
+
+      <Suspense fallback={null}>
+        <VirtualKeyboard
+          visible={isKeyboardOpen}
+          activeInput={activeInput}
+          values={{ loginId, password }}
+          onChange={handleFieldChange}
+          onEnter={requestSubmit}
+          onHide={closeKeyboard}
+        />
+      </Suspense>
     </div>
   );
 }
