@@ -11,9 +11,10 @@ export default function SummaryBar({ machines }) {
   const connectedCount = machines.filter(m => m.status !== 'No Signal').length;
   const connectedPercent = totalMachines > 0 ? (connectedCount / totalMachines) * 100 : 0;
   
-  // Calculate utilization (average of running status fraction or metrics)
+  // Machine Utilization = Running Time / Shift Elapsed Time (raw, includes breaks) - distinct
+  // from Availability, which excludes planned breaks from its denominator.
   const averageUtilization = totalMachines > 0
-    ? machines.reduce((sum, m) => sum + (m.metrics?.utilization?.Running || 0), 0) / totalMachines
+    ? machines.reduce((sum, m) => sum + (m.metrics?.machineUtilization || 0), 0) / totalMachines
     : 0;
 
   // Calculate total production pieces

@@ -69,6 +69,19 @@ export function toDateOnlyString(date = new Date()) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+/**
+ * Returns the real Date instant the currently active shift began, in plant-local time.
+ * This is the basis for "Shift Elapsed Time" - unlike since-midnight accounting, it resets
+ * at every shift change so a machine that hasn't started this shift shows the full shift
+ * gap as downtime instead of inheriting time from a previous shift.
+ */
+export function getCurrentShiftStart(now = new Date()) {
+  const shiftName = getShiftForTimestamp(now);
+  const dateStr = toDateOnlyString(now);
+  const { start } = getShiftWindow(dateStr, shiftName);
+  return start;
+}
+
 const offsetFormatter = new Intl.DateTimeFormat('en-US', {
   timeZone: PLANT_TIMEZONE,
   timeZoneName: 'shortOffset'

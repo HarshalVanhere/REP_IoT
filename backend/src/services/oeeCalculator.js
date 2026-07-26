@@ -1,6 +1,6 @@
 import db from '../config/db.js';
 import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
-import { getShiftForTimestamp } from '../config/shifts.js';
+import { getShiftForTimestamp, getCurrentShiftStart } from '../config/shifts.js';
 
 export { PREDEFINED_REASONS };
 
@@ -37,84 +37,6 @@ export function getPlannedBreaks(midnight) {
   });
   
   return breaks;
-}
-
-/**
- * Calculates net planned production seconds elapsed since midnight (excluding breaks)
- */
-export function getPlannedProductionSeconds(now) {
-  const midnight = new Date(now);
-  midnight.setHours(0, 0, 0, 0);
-  
-  const elapsedSeconds = (now.getTime() - midnight.getTime()) / 1000;
-  let plannedSeconds = 0;
-  
-  // 1. Evaluate Shift C (00:00 - 07:00)
-  if (elapsedSeconds <= 7 * 3600) {
-    plannedSeconds = elapsedSeconds;
-    // Subtract C Tea Break (03:00 - 03:20)
-    const breakStart = 3 * 3600;
-    const breakEnd = 3 * 3600 + 20 * 60;
-    if (elapsedSeconds > breakEnd) {
-      plannedSeconds -= 20 * 60;
-    } else if (elapsedSeconds > breakStart) {
-      plannedSeconds -= (elapsedSeconds - breakStart);
-    }
-  } else {
-    // Shift C is fully completed (420 mins total - 20 mins break = 400 mins)
-    plannedSeconds += 400 * 60;
-    
-    // 2. Evaluate Shift A (07:00 - 15:30)
-    if (elapsedSeconds <= 15.5 * 3600) {
-      const shiftAElapsed = elapsedSeconds - 7 * 3600;
-      plannedSeconds += shiftAElapsed;
-      
-      // Subtract A Tea Break (10:00 - 10:20)
-      const teaStart = 3 * 3600; // 3 hours past 07:00
-      const teaEnd = 3 * 3600 + 20 * 60;
-      if (shiftAElapsed > teaEnd) {
-        plannedSeconds -= 20 * 60;
-      } else if (shiftAElapsed > teaStart) {
-        plannedSeconds -= (shiftAElapsed - teaStart);
-      }
-      
-      // Subtract A Lunch Break (12:30 - 13:00)
-      const lunchStart = 5.5 * 3600; // 5.5 hours past 07:00
-      const lunchEnd = 6 * 3600;
-      if (shiftAElapsed > lunchEnd) {
-        plannedSeconds -= 30 * 60;
-      } else if (shiftAElapsed > lunchStart) {
-        plannedSeconds -= (shiftAElapsed - lunchStart);
-      }
-    } else {
-      // Shift A is fully completed (510 mins total - 50 mins breaks = 460 mins)
-      plannedSeconds += 460 * 60;
-      
-      // 3. Evaluate Shift B (15:30 - 24:00)
-      const shiftBElapsed = elapsedSeconds - 15.5 * 3600;
-      plannedSeconds += shiftBElapsed;
-      
-      // Subtract B Tea Break (18:30 - 18:50)
-      const teaStart = 3 * 3600; // 3 hours past 15:30
-      const teaEnd = 3 * 3600 + 20 * 60;
-      if (shiftBElapsed > teaEnd) {
-        plannedSeconds -= 20 * 60;
-      } else if (shiftBElapsed > teaStart) {
-        plannedSeconds -= (shiftBElapsed - teaStart);
-      }
-      
-      // Subtract B Dinner Break (20:30 - 21:00)
-      const dinnerStart = 5 * 3600; // 5 hours past 15:30
-      const dinnerEnd = 5.5 * 3600;
-      if (shiftBElapsed > dinnerEnd) {
-        plannedSeconds -= 30 * 60;
-      } else if (shiftBElapsed > dinnerStart) {
-        plannedSeconds -= (shiftBElapsed - dinnerStart);
-      }
-    }
-  }
-  
-  return Math.max(1, plannedSeconds);
 }
 
 /**
@@ -180,19 +102,18 @@ export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
  * this same pure function so the two can never drift apart.
  */
 export function computeOeeFromTotals({ plannedSeconds, operatingSeconds, totalCount, goodCount, idealCycleTime }) {
-  // Availability = Operating Time / Planned Production Time
+  // Availability = Running Time / Planned Production Time. No KPI defaults to 100% when there's
+  // no data yet - a machine that hasn't run this shift has 0% availability, not 100%.
   let availability = plannedSeconds > 0
     ? (operatingSeconds / plannedSeconds) * 100
-    : 100;
+    : 0;
   availability = Math.max(0, Math.min(100, availability));
 
-  // Performance = (Ideal Cycle Time * Total Count) / Operating Time
-  let performance = 100;
+  // Performance = (Ideal Cycle Time * Total Count) / Running Time
+  let performance = 0;
   if (operatingSeconds > 0) {
     performance = ((totalCount * idealCycleTime) / operatingSeconds) * 100;
     performance = Math.max(0, Math.min(100, performance));
-  } else {
-    performance = totalCount > 0 ? 100 : 0;
   }
 
   // Quality = Good Parts / Total Count
@@ -215,6 +136,10 @@ export async function calculateOEE(machineId) {
   const now = new Date();
   const midnight = new Date();
   midnight.setHours(0, 0, 0, 0);
+  // Shift Elapsed Time resets at every shift change, unlike since-midnight accounting - a
+  // machine that hasn't started this shift must show the full shift gap as downtime instead
+  // of inheriting Running/Stopped time logged during a previous shift today.
+  const shiftStart = getCurrentShiftStart(now);
 
   try {
     // 1. Fetch machine details
@@ -227,10 +152,11 @@ export async function calculateOEE(machineId) {
     const totalCount = machine.production_count;
     const goodCount = machine.good_count;
 
-    // 2. Fetch status logs from midnight
+    // 2. Fetch status logs since the current shift started (not midnight - Shift Elapsed Time
+    // and Downtime must reset at each shift change, see shiftStart above)
     const [logs] = await db.query(
       'SELECT status, start_time, end_time, downtime_reason FROM status_logs WHERE machine_id = ? AND (end_time IS NULL OR end_time >= ?)',
-      [machineId, midnight]
+      [machineId, shiftStart]
     );
 
     // 3. Fetch pulses / shift-wise counts (optimized using DB-level aggregates)
@@ -291,26 +217,39 @@ export async function calculateOEE(machineId) {
       }
     }
 
-    // 6. Aggregate today's status logs into utilization/downtime totals via the shared helper
+    // 6. Aggregate this shift's status logs into utilization/downtime totals via the shared
+    // helper. Running Time is summed directly from RUNNING intervals - it is the ground truth;
+    // everything else (Downtime, Availability, Utilization) is derived FROM it below, never the
+    // other way around. That's what prevents an unlogged gap (machine never started) from
+    // silently being counted as productive time.
     const todayBreaks = getPlannedBreaks(midnight);
-    const { runningSeconds, stoppedSeconds, noSignalSeconds, downtimeReasons } =
-      aggregateStatusLogs(logs, midnight, now, todayBreaks);
+    const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons } =
+      aggregateStatusLogs(logs, shiftStart, now, todayBreaks);
 
-    // Planned production seconds today
-    const plannedSeconds = getPlannedProductionSeconds(now);
+    // Shift Elapsed Time = now - shift start (raw, includes planned breaks)
+    const shiftElapsedSeconds = Math.max(0, (now.getTime() - shiftStart.getTime()) / 1000);
+    // Planned Production Time = Shift Elapsed - Planned Break Elapsed
+    const plannedSeconds = Math.max(1, shiftElapsedSeconds - breakSeconds);
 
     const runningPct = Math.max(0, Math.min(100, (runningSeconds / plannedSeconds) * 100));
     const stoppedPct = Math.max(0, Math.min(100, (stoppedSeconds / plannedSeconds) * 100));
     const noSignalPct = Math.max(0, Math.min(100, (noSignalSeconds / plannedSeconds) * 100));
 
-    // Availability = (Planned Time - Actual Downtime) / Planned Time
-    const totalDowntimeSeconds = stoppedSeconds + noSignalSeconds;
-    let operatingTimeSeconds = plannedSeconds - totalDowntimeSeconds;
-    if (operatingTimeSeconds < 0) operatingTimeSeconds = 0;
+    // Downtime = Shift Elapsed - Running Time - Planned Break Elapsed (i.e. Planned Time - Running).
+    // If the machine has never entered RUNNING, runningSeconds is 0 and the entire elapsed shift
+    // becomes downtime, as it should.
+    const totalDowntimeSeconds = Math.max(0, plannedSeconds - runningSeconds);
+
+    // Machine Utilization = Running Time / Shift Elapsed Time (0 if the shift has no elapsed time
+    // yet). Deliberately uses raw Shift Elapsed, not Planned Production Time - see Availability
+    // below for the break-excluded ratio.
+    const machineUtilization = shiftElapsedSeconds > 0
+      ? Math.max(0, Math.min(100, (runningSeconds / shiftElapsedSeconds) * 100))
+      : 0;
 
     const { availability, performance, quality, oee } = computeOeeFromTotals({
       plannedSeconds,
-      operatingSeconds: operatingTimeSeconds,
+      operatingSeconds: runningSeconds,
       totalCount,
       goodCount,
       idealCycleTime
@@ -325,6 +264,8 @@ export async function calculateOEE(machineId) {
       quality: parseFloat(quality.toFixed(1)),
       oee: parseFloat(oee.toFixed(1)),
       downtimeSeconds: Math.round(totalDowntimeSeconds),
+      shiftElapsedSeconds: Math.round(shiftElapsedSeconds),
+      machineUtilization: parseFloat(machineUtilization.toFixed(1)),
       lastCycleTime,
       currentShift,
       shifts: {
@@ -344,16 +285,21 @@ export async function calculateOEE(machineId) {
     };
   } catch (error) {
     console.error(`Error calculating OEE for machine ${machineId}:`, error.message);
+    // No KPI should read 100% for a machine we know nothing about (e.g. a DB error mid-shift) -
+    // that would silently mask real downtime, which is exactly the bug this whole calculator
+    // exists to avoid.
     return {
-      availability: 100,
+      availability: 0,
       performance: 0,
       quality: 100,
       oee: 0,
       downtimeSeconds: 0,
+      shiftElapsedSeconds: 0,
+      machineUtilization: 0,
       lastCycleTime: 0,
       currentShift: 'Shift A',
       shifts: { A: 0, B: 0, C: 0 },
-      utilization: { Running: 100, Stopped: 0, NoSignal: 0 },
+      utilization: { Running: 0, Stopped: 0, NoSignal: 0 },
       downtimeReasons: {}
     };
   }

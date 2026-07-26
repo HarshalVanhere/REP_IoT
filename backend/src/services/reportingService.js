@@ -192,9 +192,17 @@ export async function computeWindowMetrics(machineId, dateStr, windowStart, wind
   const totalWindowSeconds = Math.max(0, (clippedEnd.getTime() - windowStart.getTime()) / 1000);
   const plannedSeconds = Math.max(1, totalWindowSeconds - breakSeconds);
 
-  const totalDowntimeSeconds = stoppedSeconds + noSignalSeconds;
-  let operatingSeconds = plannedSeconds - totalDowntimeSeconds;
-  if (operatingSeconds < 0) operatingSeconds = 0;
+  // Operating Time = actual Running Time, not a residual of Stopped/No-Signal logs - a window
+  // with no status_logs rows at all (machine never ran) must show zero Operating Time and full
+  // downtime, not the other way around. Downtime is then derived FROM Running Time.
+  const operatingSeconds = Math.min(runningSeconds, plannedSeconds);
+  const totalDowntimeSeconds = Math.max(0, plannedSeconds - operatingSeconds);
+
+  // Machine Utilization = Running Time / raw window duration (includes breaks) - distinct from
+  // Availability below, which uses Planned Production Time (break-excluded) as its denominator.
+  const windowUtilization = totalWindowSeconds > 0
+    ? Math.max(0, Math.min(100, (runningSeconds / totalWindowSeconds) * 100))
+    : 0;
 
   const totalCount = pulses.length;
   const goodCount = pulses.filter((p) => p.is_good === 1 || p.is_good === true).length;
@@ -210,6 +218,8 @@ export async function computeWindowMetrics(machineId, dateStr, windowStart, wind
 
   return {
     plannedSeconds,
+    totalWindowSeconds,
+    windowUtilization,
     operatingSeconds,
     runningSeconds,
     stoppedSeconds,
@@ -246,6 +256,7 @@ function collapseByDay(shiftRows) {
   for (const [date, rows] of byDate) {
     const sumField = (field) => rows.reduce((s, r) => s + (r[field] || 0), 0);
     const plannedSeconds = sumField('plannedSeconds');
+    const totalWindowSeconds = sumField('totalWindowSeconds');
     const operatingSeconds = sumField('operatingSeconds');
     const totalCount = sumField('totalCount');
     const goodCount = sumField('goodCount');
@@ -277,6 +288,8 @@ function collapseByDay(shiftRows) {
       target,
       idealCycleTime: round1(idealCycleTime),
       plannedSeconds,
+      totalWindowSeconds,
+      windowUtilization: round1(totalWindowSeconds > 0 ? (sumField('runningSeconds') / totalWindowSeconds) * 100 : 0),
       operatingSeconds,
       runningSeconds: sumField('runningSeconds'),
       stoppedSeconds: sumField('stoppedSeconds'),
@@ -305,6 +318,7 @@ function collapseByDay(shiftRows) {
 function summarizeKpis(rows, machineId, machineName, startDate, endDate) {
   const sumField = (field) => rows.reduce((s, r) => s + (r[field] || 0), 0);
   const plannedSeconds = sumField('plannedSeconds');
+  const totalWindowSeconds = sumField('totalWindowSeconds');
   const operatingSeconds = sumField('operatingSeconds');
   const totalCount = sumField('totalCount');
   const goodCount = sumField('goodCount');
@@ -334,6 +348,7 @@ function summarizeKpis(rows, machineId, machineName, startDate, endDate) {
     startDate,
     endDate,
     plannedProductionSeconds: plannedSeconds,
+    totalWindowSeconds,
     operatingSeconds,
     runningSeconds,
     stoppedSeconds,
@@ -351,7 +366,9 @@ function summarizeKpis(rows, machineId, machineName, startDate, endDate) {
     performance: round1(performance),
     quality: round1(quality),
     oee: round1(oee),
-    machineUtilization: round1(plannedSeconds > 0 ? (operatingSeconds / plannedSeconds) * 100 : 0),
+    // Utilization = Running Time / raw window duration (includes breaks) - intentionally NOT the
+    // same formula as Availability (which divides by break-excluded Planned Production Time).
+    machineUtilization: round1(totalWindowSeconds > 0 ? (operatingSeconds / totalWindowSeconds) * 100 : 0),
     productionAchievement: target > 0 ? round1((totalCount / target) * 100) : null,
     rejectionPercent: totalCount > 0 ? round1((rejectCount / totalCount) * 100) : 0,
     yieldPercent: totalCount > 0 ? round1((goodCount / totalCount) * 100) : 100,
