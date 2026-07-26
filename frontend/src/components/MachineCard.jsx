@@ -157,7 +157,7 @@ export default function MachineCard({ machine, history = [], canResetCount = fal
               />
             </svg>
             <div className="absolute flex flex-col items-center justify-center">
-              <span className="text-2xl font-black text-slate-800 font-sans">{oee.toFixed(0)}%</span>
+              <span className="text-2xl font-black text-slate-800 font-sans">{oee.toFixed(1)}%</span>
               <span className="text-[10px] font-black tracking-widest text-slate-400 uppercase">OEE</span>
             </div>
           </div>
