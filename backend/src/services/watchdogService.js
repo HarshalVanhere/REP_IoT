@@ -225,31 +225,55 @@ export function startWatchdogService(broadcast) {
         const threshold = machine.ideal_cycle_time + 120;
 
         if (secondsSinceLastPulse > threshold) {
-          logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Stopped.`);
+          // On the Cloud, last_pulse only advances when the Edge Gateway's HTTP sync loop
+          // (syncService.js, every 5s) successfully delivers a batch - a network blip or a
+          // redeploy can stall that for minutes while the physical machine, watched by its own
+          // Edge Gateway process with real-time serial telemetry, is genuinely still running.
+          // Cloud has no serial port (sendSerialCommand no-ops there) and no low-latency signal
+          // of its own, so it must not force machines.status to Stopped on this evidence alone -
+          // doing so used to write a phantom "Stopped" status_logs row that nothing ever
+          // corrected, since the Edge Gateway only re-uploads a status row when a *real*
+          // transition happens, which a machine that never actually stopped will never produce.
+          // Cloud only ever gets to flag this as a sync-lag warning; the Edge Gateway is the
+          // sole authority allowed to actually stop the machine.
+          if (process.env.IS_EDGE_GATEWAY === 'true') {
+            logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Stopped.`);
 
-          // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
-          // this can never fire in the middle of - or immediately undo - an operator action or
-          // a schedule sync that's already in flight for the same machine.
-          await withMachineLock(machine.id, async () => {
-            // Trigger physical machine lockout interlock relay
-            try {
-              await sendSerialCommand(machine.id, 'stop');
-            } catch (serialErr) {
-              logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
-            }
+            // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
+            // this can never fire in the middle of - or immediately undo - an operator action or
+            // a schedule sync that's already in flight for the same machine.
+            await withMachineLock(machine.id, async () => {
+              // Trigger physical machine lockout interlock relay
+              try {
+                await sendSerialCommand(machine.id, 'stop');
+              } catch (serialErr) {
+                logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
+              }
 
-            // Force-transition status to Stopped (closes running log and creates stopped log,
-            // and - see handleStatusMessage - stamps last_cycle_reset_at so Last Cycle reads 0)
-            await handleStatusMessage(machine.id, 'Stopped');
-          });
-
-          if (shouldEmitAlert(`${machine.id}:stale`)) {
-            emitAlert({
-              severity: 'critical',
-              machineId: machine.id,
-              machineName: machine.name,
-              message: `${machine.name} auto-stopped: no signal for ${Math.round(secondsSinceLastPulse)}s`
+              // Force-transition status to Stopped (closes running log and creates stopped log,
+              // and - see handleStatusMessage - stamps last_cycle_reset_at so Last Cycle reads 0)
+              await handleStatusMessage(machine.id, 'Stopped');
             });
+
+            if (shouldEmitAlert(`${machine.id}:stale`)) {
+              emitAlert({
+                severity: 'critical',
+                machineId: machine.id,
+                machineName: machine.name,
+                message: `${machine.name} auto-stopped: no signal for ${Math.round(secondsSinceLastPulse)}s`
+              });
+            }
+          } else {
+            logger.warn(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") has not synced from its Edge Gateway in ${secondsSinceLastPulse.toFixed(1)}s (threshold: ${threshold}s) - leaving status as-is, Cloud is not authoritative for stopping machines.`);
+
+            if (shouldEmitAlert(`${machine.id}:sync-lag`)) {
+              emitAlert({
+                severity: 'warning',
+                machineId: machine.id,
+                machineName: machine.name,
+                message: `${machine.name}: no data synced from its Edge Gateway for ${Math.round(secondsSinceLastPulse)}s - dashboard may be stale`
+              });
+            }
           }
         }
 

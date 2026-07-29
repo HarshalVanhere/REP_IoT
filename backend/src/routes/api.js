@@ -606,9 +606,20 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
     await connection.beginTransaction();
 
     // 1. Process batch pulses
+    const latestPulseTimeByMachine = new Map();
     for (const pulse of pulses) {
       const pulseTime = new Date(pulse.timestamp);
       pulseTime.setMilliseconds(0);
+
+      // Track the freshest pulse timestamp per machine in this batch (even for pulses that
+      // turn out to be duplicates below) - used after the status log pass to detect a machine
+      // the Edge Gateway has proven is actually Running via real telemetry (it never sends a
+      // pulse for a machine whose local status is Stopped - see handlePulseMessage) but whose
+      // last known status_logs entry on the cloud says otherwise.
+      const prevLatest = latestPulseTimeByMachine.get(pulse.machine_id);
+      if (!prevLatest || pulseTime.getTime() > prevLatest) {
+        latestPulseTimeByMachine.set(pulse.machine_id, pulseTime.getTime());
+      }
 
       // Check if pulse already exists in cloud DB to prevent duplication
       const [existing] = await connection.query(
@@ -693,6 +704,40 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
       if (latest) {
         await connection.query('UPDATE machines SET status = ? WHERE id = ?', [latest.status, machineId]);
       }
+    }
+
+    // Self-heal a machine the cloud believes is Stopped/No Signal but that just proved via a
+    // real pulse it's actually Running - this is what recovers a machine from a false auto-stop
+    // the Cloud's own watchdog previously wrote (see watchdogService.js: the Cloud has no
+    // low-latency signal of its own and used to force machines.status to Stopped purely because
+    // sync had lagged, leaving a phantom Stopped status_logs row that nothing ever corrected,
+    // since the Edge Gateway only re-uploads a status row on a *real* transition - which a
+    // machine that never actually stopped will never produce). A pulse timestamped after the
+    // latest known status_logs row is only possible if that row is stale/wrong: the Edge Gateway
+    // refuses to emit pulses at all while its own local status is Stopped, so this pulse is
+    // proof positive the machine was Running at a time the cloud didn't yet know about.
+    for (const [machineId, latestPulseTime] of latestPulseTimeByMachine) {
+      const [[machineRow]] = await connection.query('SELECT status FROM machines WHERE id = ?', [machineId]);
+      if (!machineRow || machineRow.status === 'Running') continue;
+
+      const [[latestLog]] = await connection.query(
+        'SELECT status, start_time FROM status_logs WHERE machine_id = ? ORDER BY start_time DESC, id DESC LIMIT 1',
+        [machineId]
+      );
+      if (latestLog && latestLog.status === 'Running') continue;
+      if (latestLog && latestPulseTime <= new Date(latestLog.start_time).getTime()) continue;
+
+      const reconciledAt = new Date(latestPulseTime);
+      await connection.query(
+        'UPDATE status_logs SET end_time = ? WHERE machine_id = ? AND end_time IS NULL',
+        [reconciledAt, machineId]
+      );
+      await connection.query(
+        "INSERT INTO status_logs (machine_id, status, start_time, end_time) VALUES (?, 'Running', ?, NULL)",
+        [machineId, reconciledAt]
+      );
+      await connection.query("UPDATE machines SET status = 'Running' WHERE id = ?", [machineId]);
+      logger.warn(`🔄 Sync: Machine ${machineId} received a pulse newer than its last known status change (cloud had it as "${machineRow.status}") - reconciling to Running.`);
     }
 
     await connection.commit();
