@@ -1,5 +1,5 @@
 import db from '../config/db.js';
-import { SHIFT_NAMES, getShiftWindow, getShiftForTimestamp, toDateOnlyString } from '../config/shifts.js';
+import { SHIFT_NAMES, getShiftWindow } from '../config/shifts.js';
 import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getIntervalOverlapSeconds } from './oeeCalculator.js';
 
 // Downtime reasons treated as "Planned" for the Downtime Analysis module's Planned/Unplanned
@@ -546,32 +546,52 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
   const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
   const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
 
-  const allEvents = allSorted
+  // A single continuous "Stopped" status_logs row can predate rangeStart (a stoppage that began
+  // days ago and is still open) or run past rangeEnd/"now". Attributing its FULL raw duration to
+  // whichever shift its original start_time happened to fall in - as a naive "one log = one
+  // event" mapping would - lets an old, still-open stoppage's entire multi-day duration leak into
+  // a single shift's report (Downtime % > 100%, an event dated days before the requested range).
+  // Instead, split each log into one sub-event per (date, shift) window it actually overlaps
+  // within the requested range, clipped to that window's boundaries - duration can then never
+  // exceed the shift's own length, and date/shift always reflect real time spent in that window.
+  const allEvents = [];
+  allSorted
     .filter((log) => log.status === 'Stopped')
-    .map((log) => {
+    .forEach((log) => {
       const idx = allSorted.findIndex((l) => l.id === log.id);
       const before = idx > 0 ? allSorted[idx - 1].status : null;
       const after = idx >= 0 && idx < allSorted.length - 1 ? allSorted[idx + 1].status : null;
-      const start = new Date(log.start_time);
-      const end = log.end_time ? new Date(log.end_time) : new Date();
-      const durationSeconds = Math.max(0, (end.getTime() - start.getTime()) / 1000);
       const reason = log.downtime_reason || 'Other';
 
-      return {
-        id: log.id,
-        date: toDateOnlyString(start),
-        shift: getShiftForTimestamp(start),
-        startTime: log.start_time,
-        endTime: log.end_time,
-        durationSeconds,
-        reason,
-        category: PLANNED_REASONS.has(reason) ? 'Planned' : 'Unplanned',
-        operator: log.operator_id,
-        partNumber: log.part_name,
-        statusBefore: before,
-        statusAfter: after,
-        remarks: null
-      };
+      const logStart = new Date(Math.max(new Date(log.start_time).getTime(), rangeStart.getTime()));
+      const logEndRaw = log.end_time ? new Date(log.end_time) : new Date();
+      const logEnd = new Date(Math.min(logEndRaw.getTime(), rangeEnd.getTime()));
+      if (logEnd <= logStart) return;
+
+      dates.forEach((dateStr) => {
+        SHIFT_NAMES.forEach((shiftName) => {
+          const window = getShiftWindow(dateStr, shiftName);
+          const overlapStart = new Date(Math.max(logStart.getTime(), window.start.getTime()));
+          const overlapEnd = new Date(Math.min(logEnd.getTime(), window.end.getTime()));
+          if (overlapEnd <= overlapStart) return;
+
+          allEvents.push({
+            id: `${log.id}-${dateStr}-${shiftName}`,
+            date: dateStr,
+            shift: shiftName,
+            startTime: overlapStart,
+            endTime: overlapEnd.getTime() === logEndRaw.getTime() ? log.end_time : overlapEnd,
+            durationSeconds: (overlapEnd.getTime() - overlapStart.getTime()) / 1000,
+            reason,
+            category: PLANNED_REASONS.has(reason) ? 'Planned' : 'Unplanned',
+            operator: log.operator_id,
+            partNumber: log.part_name,
+            statusBefore: before,
+            statusAfter: after,
+            remarks: null
+          });
+        });
+      });
     });
 
   // Applied AFTER the before/after neighbor lookup above (which needs the full, unfiltered
