@@ -13,6 +13,16 @@ import { useToast } from './Toast';
 
 const SHIFT_NAMES = ['Shift A', 'Shift B', 'Shift C'];
 
+// Default planned_start/planned_end offered when adding a part to a shift - matches the plant's
+// actual shift boundaries (backend/src/config/shifts.js SHIFT_DEFINITIONS), not just Shift A's
+// window for every shift. Shift B's end is stored as "00:00" (midnight) - calculateAutoTarget on
+// the backend already knows to treat that as the following day's midnight, not plan_date's own.
+const SHIFT_DEFAULT_WINDOW = {
+  'Shift A': { start: '07:00', end: '15:30' },
+  'Shift B': { start: '15:30', end: '00:00' },
+  'Shift C': { start: '00:00', end: '07:00' }
+};
+
 function toDateStr(date) {
   const d = new Date(date);
   const year = d.getFullYear();
@@ -269,8 +279,9 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
   }, [entryModal, entryForm.ideal_cycle_time, entryForm.load_unload_allowance_seconds, entryForm.planned_start, entryForm.planned_end, selectedDate, authToken]);
 
   const openAddModal = (machineId, machineName, shift) => {
+    const defaultWindow = SHIFT_DEFAULT_WINDOW[shift] || SHIFT_DEFAULT_WINDOW['Shift A'];
     setEntryModal({ mode: 'create', machineId, machineName, shift, entry: null });
-    setEntryForm({ part_number: '', part_name: '', part_operation: '', ideal_cycle_time: '', load_unload_allowance_seconds: '', planned_start: '07:00', planned_end: '15:30' });
+    setEntryForm({ part_number: '', part_name: '', part_operation: '', ideal_cycle_time: '', load_unload_allowance_seconds: '', planned_start: defaultWindow.start, planned_end: defaultWindow.end });
     setTargetPreview(null);
   };
 
