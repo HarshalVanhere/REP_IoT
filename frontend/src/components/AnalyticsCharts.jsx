@@ -1,6 +1,7 @@
 import React from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, PieChart, Pie, Cell } from 'recharts';
 import { BarChart3, TrendingUp, Clock, PieChart as PieIcon } from 'lucide-react';
+import { isConnected } from '../lib/connectivity';
 
 // Predefined downtime reasons colors for pie chart
 const COLORS = [
@@ -18,8 +19,14 @@ export default function AnalyticsCharts({ machines, reasonCodes = [] }) {
   // Reason codes come from GET /api/reason-codes (backend single source of truth) instead
   // of being duplicated here - keeps this chart's legend in sync with OEE aggregation.
   const PREDEFINED_REASONS = reasonCodes;
+
+  // Not Connected machines (no IoT device wired up, or signal lost past heartbeat timeout) have
+  // no real production/OEE data - excluded from every fleet-wide chart below rather than
+  // dragging every average down with fabricated zeros.
+  const connectedMachines = machines.filter(isConnected);
+
   // 1. Prepare data for OEE breakdown chart
-  const oeeData = machines.map(m => ({
+  const oeeData = connectedMachines.map(m => ({
     name: m.id,
     OEE: m.metrics?.oee || 0,
     Availability: m.metrics?.availability || 0,
@@ -28,7 +35,7 @@ export default function AnalyticsCharts({ machines, reasonCodes = [] }) {
   }));
 
   // 2. Prepare data for Machine Utilization stacked bar
-  const utilizationData = machines.map(m => ({
+  const utilizationData = connectedMachines.map(m => ({
     name: m.id,
     Running: m.metrics?.utilization?.Running || 0,
     Stopped: m.metrics?.utilization?.Stopped || 0,
@@ -36,7 +43,7 @@ export default function AnalyticsCharts({ machines, reasonCodes = [] }) {
   }));
 
   // 3. Prepare data for Shift-wise production comparison
-  const shiftData = machines.map(m => ({
+  const shiftData = connectedMachines.map(m => ({
     name: m.id,
     'Shift A': m.metrics?.shifts?.A || 0,
     'Shift B': m.metrics?.shifts?.B || 0,
@@ -47,7 +54,7 @@ export default function AnalyticsCharts({ machines, reasonCodes = [] }) {
   const reasonsAgg = {};
   PREDEFINED_REASONS.forEach(r => reasonsAgg[r] = 0);
   
-  machines.forEach(m => {
+  connectedMachines.forEach(m => {
     const reasons = m.metrics?.downtimeReasons || {};
     Object.keys(reasons).forEach(r => {
       reasonsAgg[r] = (reasonsAgg[r] || 0) + reasons[r];
@@ -157,7 +164,7 @@ export default function AnalyticsCharts({ machines, reasonCodes = [] }) {
                 <Legend verticalAlign="top" height={36} iconSize={8} iconType="circle" wrapperStyle={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 'bold' }} />
                 <Bar dataKey="Running" stackId="u" fill="#057e39" name="Running %" radius={[0, 0, 0, 0]} />
                 <Bar dataKey="Stopped" stackId="u" fill="#ff2400" name="Stopped %" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="Offline" stackId="u" fill="#94a3b8" name="No Signal %" radius={[0, 4, 4, 0]} />
+                <Bar dataKey="Offline" stackId="u" fill="#94a3b8" name="Not Connected %" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

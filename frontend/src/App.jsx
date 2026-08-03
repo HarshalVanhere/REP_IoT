@@ -24,7 +24,8 @@ import {
   Flame,
   UserCheck,
   PackageCheck,
-  Gauge
+  Gauge,
+  UserCog
 } from 'lucide-react';
 import Header from './components/Header';
 import LoginScreen from './components/LoginScreen';
@@ -46,6 +47,7 @@ const ReportsLog = lazy(() => import('./components/ReportsLog'));
 const PartScheduleBoard = lazy(() => import('./components/PartScheduleBoard'));
 const ProductionSummary = lazy(() => import('./components/ProductionSummary'));
 const OeeReportPage = lazy(() => import('./components/OeeReportPage'));
+const OperatorAssignment = lazy(() => import('./components/OperatorAssignment'));
 
 function ViewLoadingFallback() {
   return (
@@ -57,7 +59,7 @@ function ViewLoadingFallback() {
 import { WS_URL, apiFetch, AuthError } from './lib/api';
 
 const SHIFT_OPTIONS = ['All Shifts', 'Shift A', 'Shift B', 'Shift C'];
-const STATUS_OPTIONS = ['All', 'Running', 'Stopped', 'No Signal'];
+const STATUS_OPTIONS = ['All', 'Running', 'Stopped', 'Not Connected'];
 const ROLE_OPTIONS = ['Supervisor', 'PPC Engineer', 'Admin', 'Operator'];
 
 function getShiftFromTimestamp(timestamp) {
@@ -637,7 +639,7 @@ function AppShell() {
       { Report_KPI: 'Plant Average OEE', Value_Percentage: `${plantOeeValue}%`, Target_Threshold: '85.0%', Status_Alert: parseFloat(plantOeeValue) >= 85 ? 'Normal' : 'Underperforming' },
       { Report_KPI: 'Primary Stoppage Bottleneck', Value_Percentage: topReason, Target_Threshold: 'None', Status_Alert: 'Review Required' },
       { Report_KPI: 'Total Scrap Defect Yield', Value_Percentage: `${scrapRate}%`, Target_Threshold: '< 2.0%', Status_Alert: parseFloat(scrapRate) < 2.0 ? 'Safe' : 'Critical Hazard' },
-      { Report_KPI: 'Active Machines Connected', Value_Percentage: `${(machines.filter(m => m.status !== 'No Signal').length / (machines.length || 1) * 100).toFixed(1)}%`, Target_Threshold: '100.0%', Status_Alert: 'Live Sync OK' },
+      { Report_KPI: 'Active Machines Connected', Value_Percentage: `${(machines.filter(m => m.status !== 'Not Connected').length / (machines.length || 1) * 100).toFixed(1)}%`, Target_Threshold: '100.0%', Status_Alert: 'Live Sync OK' },
       { Report_KPI: 'Total Factory Pieces Produced', Value_Percentage: machines.reduce((sum, m) => sum + (m.production_count || 0), 0), Target_Threshold: machines.length * 100, Status_Alert: 'In Progress' }
     ];
     
@@ -916,6 +918,21 @@ function AppShell() {
               {!sidebarCollapsed && <span>OEE & Downtime Reports</span>}
             </button>
 
+            {/* 5.7 Operator Assignment (Supervisor + Admin only) */}
+            {(sessionUser.role === 'Supervisor' || sessionUser.role === 'Admin') && (
+              <button
+                onClick={() => { setActiveView('operator-assignment'); setMobileSidebarOpen(false); }}
+                className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl text-sm font-black uppercase tracking-wider transition-all ${
+                  activeView === 'operator-assignment'
+                    ? 'bg-[var(--secondary2-trans-100)] text-[var(--primary)]'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`}
+              >
+                <UserCog className="w-5 h-5 shrink-0" />
+                {!sidebarCollapsed && <span>Operator Assignment</span>}
+              </button>
+            )}
+
             {/* 6. Operator Simulator Panel - edge gateway only, see isEdgeGateway above */}
             {isEdgeGateway && (
               <button
@@ -1091,9 +1108,9 @@ function AppShell() {
                   <div className="p-4 bg-[var(--bg-color-page)]/40 border border-[var(--grey-200)] rounded-2xl leading-snug">
                     <span className="text-xs font-black text-slate-400 uppercase tracking-wider">Asset Connected Ratio</span>
                     <div className="text-3xl font-black text-[var(--grey-900)] mt-1.5">
-                      {((machines.filter(m => m.status !== 'No Signal').length / (machines.length || 1)) * 100).toFixed(1)}%
+                      {((machines.filter(m => m.status !== 'Not Connected').length / (machines.length || 1)) * 100).toFixed(1)}%
                     </div>
-                    <p className="text-xs text-slate-400 mt-2 font-bold">Total active IoT nodes: {machines.filter(m => m.status !== 'No Signal').length}/{machines.length}</p>
+                    <p className="text-xs text-slate-400 mt-2 font-bold">Total active IoT nodes: {machines.filter(m => m.status !== 'Not Connected').length}/{machines.length}</p>
                   </div>
                 </div>
               </div>
@@ -1111,18 +1128,26 @@ function AppShell() {
                   </div>
                 </div>
                 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-6 text-center text-sm font-bold">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-6 mb-6 text-center text-sm font-bold">
+                  <div className="p-4 bg-[var(--bg-color-page)] text-[var(--grey-700)] border border-[var(--grey-200)] rounded-2xl">
+                    <span className="text-xs font-black uppercase tracking-wider block text-slate-400">Total Machines</span>
+                    <span className="text-2xl font-black block mt-1">{machines.length}</span>
+                  </div>
+                  <div className="p-4 bg-sky-50 text-sky-700 border border-sky-100 rounded-2xl">
+                    <span className="text-xs font-black uppercase tracking-wider block text-sky-600">Connected</span>
+                    <span className="text-2xl font-black block mt-1">{machines.filter(m => m.status !== 'Not Connected').length} / {machines.length}</span>
+                  </div>
+                  <div className="p-4 bg-slate-50 text-slate-500 border border-slate-200 rounded-2xl">
+                    <span className="text-xs font-black uppercase tracking-wider block text-slate-400">Not Connected</span>
+                    <span className="text-2xl font-black block mt-1">{machines.filter(m => m.status === 'Not Connected').length} / {machines.length}</span>
+                  </div>
                   <div className="p-4 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-2xl">
-                    <span className="text-xs font-black uppercase tracking-wider block text-emerald-600">Running Machines</span>
+                    <span className="text-xs font-black uppercase tracking-wider block text-emerald-600">Running</span>
                     <span className="text-2xl font-black block mt-1">{machines.filter(m => m.status === 'Running').length} / {machines.length}</span>
                   </div>
                   <div className="p-4 bg-rose-50 text-rose-700 border border-rose-100 rounded-2xl">
-                    <span className="text-xs font-black uppercase tracking-wider block text-rose-600">Stopped Machines</span>
+                    <span className="text-xs font-black uppercase tracking-wider block text-rose-600">Stopped</span>
                     <span className="text-2xl font-black block mt-1">{machines.filter(m => m.status === 'Stopped').length} / {machines.length}</span>
-                  </div>
-                  <div className="p-4 bg-slate-50 text-slate-500 border border-slate-200 rounded-2xl">
-                    <span className="text-xs font-black uppercase tracking-wider block text-slate-400">Offline Nodes</span>
-                    <span className="text-2xl font-black block mt-1">{machines.filter(m => m.status === 'No Signal').length} / {machines.length}</span>
                   </div>
                 </div>
 
@@ -1537,6 +1562,11 @@ function AppShell() {
                 onAuthError={handleAuthError}
               />
             </div>
+          ) : activeView === 'operator-assignment' ? (
+            // 5.7 Operator Assignment (Supervisor + Admin only)
+            <Suspense fallback={<ViewLoadingFallback />}>
+              <OperatorAssignment authToken={authToken} machines={machines} onAuthError={handleAuthError} />
+            </Suspense>
           ) : activeView === 'audit' ? (
             // 8. Audit Log (Admin only)
             <div className="animate-in fade-in duration-200 text-left">

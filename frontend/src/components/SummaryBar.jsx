@@ -8,7 +8,7 @@ export default function SummaryBar({ machines }) {
   const capacityHours = totalMachines * 24;
   
   // Calculate connected percentage
-  const connectedCount = machines.filter(m => m.status !== 'No Signal').length;
+  const connectedCount = machines.filter(m => m.status !== 'Not Connected').length;
   const connectedPercent = totalMachines > 0 ? (connectedCount / totalMachines) * 100 : 0;
   
   // Machine Utilization = Running Time / Shift Elapsed Time (raw, includes breaks) - distinct

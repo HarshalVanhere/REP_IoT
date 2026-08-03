@@ -19,7 +19,7 @@ function formatTime(value) {
   });
 }
 
-const STATUS_COLORS = { Running: '#057e39', Stopped: '#ff2400', 'No Signal': '#94a3b8' };
+const STATUS_COLORS = { Running: '#057e39', Stopped: '#ff2400', 'Not Connected': '#94a3b8' };
 
 export default function OeeDetailDrawer({ isOpen, onClose, authToken, machineId, machineName, date, shift, onAuthError }) {
   const { showToast } = useToast();

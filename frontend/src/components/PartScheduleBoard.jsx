@@ -201,10 +201,22 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
   const liveCurrentShift = machines.find((m) => m.metrics?.currentShift)?.metrics?.currentShift || 'Shift A';
 
   const [entryModal, setEntryModal] = useState(null); // { mode, machineId, machineName, shift, entry }
-  const [entryForm, setEntryForm] = useState({ part_name: '', target: 0, ideal_cycle_time: 0, operator: '', planned_start: '', planned_end: '' });
+  const [entryForm, setEntryForm] = useState({
+    part_number: '', part_name: '', part_operation: '',
+    ideal_cycle_time: '', load_unload_allowance_seconds: '',
+    planned_start: '', planned_end: ''
+  });
   const [copyConfirmOpen, setCopyConfirmOpen] = useState(false);
   const [activatingEntry, setActivatingEntry] = useState(null);
   const [activateReason, setActivateReason] = useState('');
+
+  // Live "Auto Target: N parts" preview, recomputed server-side (same calculateAutoTarget the
+  // save actually uses) whenever ideal_cycle_time/allowance/planned_start/planned_end change -
+  // never computed client-side, so the preview can never drift from what gets saved. There is no
+  // Part Master catalog and no default allowance - Part Number/Name/Operation, Ideal Cycle Time,
+  // and the Loading/Unloading Allowance are all typed directly into this form every time.
+  const [targetPreview, setTargetPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const monthCells = useMemo(() => buildMonthGrid(viewMonth), [viewMonth]);
 
@@ -226,27 +238,61 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, authToken]);
 
+  // Live target preview - server-computed (calculateAutoTarget), debounced against
+  // ideal_cycle_time/allowance/planned_start/planned_end changes so it doesn't fire on every keystroke.
+  useEffect(() => {
+    const cycle = parseInt(entryForm.ideal_cycle_time);
+    const allowance = parseInt(entryForm.load_unload_allowance_seconds);
+    if (!entryModal || isNaN(cycle) || cycle <= 0 || isNaN(allowance) || allowance < 0 || !entryForm.planned_start || !entryForm.planned_end) {
+      setTargetPreview(null);
+      return undefined;
+    }
+    setPreviewLoading(true);
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({
+        planDate: selectedDate,
+        plannedStart: entryForm.planned_start,
+        plannedEnd: entryForm.planned_end,
+        idealCycleTime: String(cycle),
+        loadUnloadAllowanceSeconds: String(allowance)
+      });
+      apiFetch(`/api/part-schedules/preview-target?${params.toString()}`, { token: authToken })
+        .then((data) => setTargetPreview(data))
+        .catch((err) => {
+          setTargetPreview(null);
+          if (!onAuthError?.(err)) showToast(err.message || 'Failed to compute target preview.', 'error');
+        })
+        .finally(() => setPreviewLoading(false));
+    }, 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entryModal, entryForm.ideal_cycle_time, entryForm.load_unload_allowance_seconds, entryForm.planned_start, entryForm.planned_end, selectedDate, authToken]);
+
   const openAddModal = (machineId, machineName, shift) => {
     setEntryModal({ mode: 'create', machineId, machineName, shift, entry: null });
-    setEntryForm({ part_name: '', target: 0, ideal_cycle_time: 0, operator: '', planned_start: '07:00', planned_end: '15:30' });
+    setEntryForm({ part_number: '', part_name: '', part_operation: '', ideal_cycle_time: '', load_unload_allowance_seconds: '', planned_start: '07:00', planned_end: '15:30' });
+    setTargetPreview(null);
   };
 
   const openEditModal = (entry) => {
     const row = rows.find((r) => r.entries.some((e) => e.id === entry.id));
     setEntryModal({ mode: 'edit', machineId: row.machineId, machineName: row.machineName, shift: row.shift, entry });
     setEntryForm({
-      part_name: entry.part_name,
-      target: entry.target,
+      part_number: entry.part_number || '',
+      part_name: entry.part_name || '',
+      part_operation: entry.part_operation || '',
       ideal_cycle_time: entry.ideal_cycle_time,
-      operator: entry.operator || '',
+      load_unload_allowance_seconds: entry.load_unload_allowance_seconds ?? '',
       planned_start: timeHHMM(entry.planned_start),
       planned_end: timeHHMM(entry.planned_end)
     });
+    setTargetPreview(null);
   };
 
   const handleSaveEntry = async (e) => {
     e.preventDefault();
     if (!entryModal) return;
+    const selectedPartName = entryForm.part_name || 'part';
 
     try {
       if (entryModal.mode === 'edit') {
@@ -255,14 +301,14 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
           token: authToken,
           body: entryForm
         });
-        showToast(`Updated "${entryForm.part_name}"`, 'success');
+        showToast(`Updated "${selectedPartName}"`, 'success');
       } else {
         await apiFetch('/api/part-schedules', {
           method: 'POST',
           token: authToken,
           body: { machine_id: entryModal.machineId, plan_date: selectedDate, shift: entryModal.shift, ...entryForm }
         });
-        showToast(`Added "${entryForm.part_name}" to ${entryModal.shift}`, 'success');
+        showToast(`Added "${selectedPartName}" to ${entryModal.shift}`, 'success');
       }
       setEntryModal(null);
       fetchSchedules(selectedDate);
@@ -529,38 +575,81 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
               <button onClick={() => setEntryModal(null)} className="text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleSaveEntry} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Part Number</label>
+                  <input
+                    value={entryForm.part_number}
+                    onChange={(e) => setEntryForm({ ...entryForm, part_number: e.target.value })}
+                    disabled={entryModal.mode === 'edit'}
+                    required
+                    placeholder="e.g. DK68"
+                    className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none disabled:opacity-60"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Part Name</label>
+                  <input
+                    value={entryForm.part_name}
+                    onChange={(e) => setEntryForm({ ...entryForm, part_name: e.target.value })}
+                    disabled={entryModal.mode === 'edit'}
+                    required
+                    placeholder="e.g. Pulley Assembly"
+                    className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none disabled:opacity-60"
+                  />
+                </div>
+              </div>
+              {entryModal.mode === 'edit' && (
+                <p className="text-[9px] text-slate-400 -mt-2">Part Number/Name can't be changed here - delete and re-add instead.</p>
+              )}
               <div>
-                <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Part Name</label>
+                <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Part Operation</label>
                 <input
-                  value={entryForm.part_name}
-                  onChange={(e) => setEntryForm({ ...entryForm, part_name: e.target.value })}
-                  disabled={entryModal.mode === 'edit'}
-                  required
-                  className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none disabled:opacity-60"
+                  value={entryForm.part_operation}
+                  onChange={(e) => setEntryForm({ ...entryForm, part_operation: e.target.value })}
+                  placeholder="e.g. Turning, Facing, Drilling"
+                  className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none"
                 />
-                {entryModal.mode === 'edit' && (
-                  <p className="text-[9px] text-slate-400 mt-1">Renaming isn't allowed - delete and re-add to change the part.</p>
-                )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Target Qty</label>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Ideal Cycle Time (s)</label>
                   <input
                     type="number"
-                    value={entryForm.target}
-                    onChange={(e) => setEntryForm({ ...entryForm, target: parseInt(e.target.value) || 0 })}
+                    min="1"
+                    value={entryForm.ideal_cycle_time}
+                    onChange={(e) => setEntryForm({ ...entryForm, ideal_cycle_time: e.target.value })}
+                    required
                     className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none"
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Ideal Cycle (s)</label>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Loading/Unloading (s)</label>
                   <input
                     type="number"
-                    value={entryForm.ideal_cycle_time}
-                    onChange={(e) => setEntryForm({ ...entryForm, ideal_cycle_time: parseInt(e.target.value) || 0 })}
+                    min="0"
+                    value={entryForm.load_unload_allowance_seconds}
+                    onChange={(e) => setEntryForm({ ...entryForm, load_unload_allowance_seconds: e.target.value })}
+                    required
+                    placeholder="e.g. 15"
                     className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none"
                   />
                 </div>
+              </div>
+              <div className="bg-[var(--bg-color-page)] border border-[var(--grey-200)] rounded-xl py-2.5 px-3">
+                <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Automatic Target</label>
+                {previewLoading ? (
+                  <p className="text-xs font-bold text-slate-400">Calculating...</p>
+                ) : targetPreview ? (
+                  <p className="text-sm font-black text-[var(--grey-900)]">
+                    {targetPreview.target} parts
+                    <span className="block text-[10px] font-semibold text-slate-400 mt-0.5 normal-case">
+                      Effective Cycle {targetPreview.effectiveCycleTime}s over {Math.round(targetPreview.availableSeconds / 60)}m available
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-xs font-bold text-slate-400">Enter Ideal Cycle Time, Allowance, and the planned window to calculate.</p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -584,17 +673,13 @@ export default function PartScheduleBoard({ authToken, machines, sessionUser, on
                   />
                 </div>
               </div>
-              <div>
-                <label className="block text-[10px] font-black uppercase tracking-wider text-slate-455 mb-1">Operator</label>
-                <input
-                  value={entryForm.operator}
-                  onChange={(e) => setEntryForm({ ...entryForm, operator: e.target.value })}
-                  className="w-full bg-[var(--bg-color-page)] border border-[var(--grey-200)] focus:border-[var(--primary)] rounded-xl py-2.5 px-3 text-xs font-bold outline-none"
-                />
-              </div>
+              <p className="text-[10px] text-slate-400 font-semibold px-0.5">
+                Operator assignment is handled separately by the Supervisor once this part is scheduled.
+              </p>
               <button
                 type="submit"
-                className="w-full bg-[var(--primary)] text-white text-xs font-black uppercase tracking-wider py-3 rounded-xl transition active:scale-95 mt-2"
+                disabled={!entryForm.part_number || !entryForm.part_name}
+                className="w-full bg-[var(--primary)] disabled:opacity-40 text-white text-xs font-black uppercase tracking-wider py-3 rounded-xl transition active:scale-95 mt-2"
               >
                 {entryModal.mode === 'edit' ? 'Save Changes' : 'Add Part'}
               </button>

@@ -395,7 +395,7 @@ router.get('/reports/oee-detail', requireAuth, async (req, res) => {
  * without editing source code or re-running the seed script.
  */
 router.post('/machines', requireAuth, requireRole('Admin'), async (req, res) => {
-  const { id, name, department, target, ideal_cycle_time, active_part_name, assigned_operator } = req.body;
+  const { id, name, department, target, ideal_cycle_time, active_part_name, assigned_operator, iot_enabled } = req.body;
 
   if (!id || !name || !department) {
     return res.status(400).json({ error: 'id, name, and department are required' });
@@ -407,9 +407,12 @@ router.post('/machines', requireAuth, requireRole('Admin'), async (req, res) => 
       return res.status(409).json({ error: `Machine ${id} already exists` });
     }
 
+    // iot_enabled defaults FALSE - a newly-registered machine has no confirmed physical
+    // ESP32/Raspberry Pi wiring yet, so it must start as "Not Connected" until an Admin flips
+    // this on (see watchdogService.js's per-tick connectivity enforcement).
     await db.query(
-      'INSERT INTO machines (id, name, department, target, ideal_cycle_time, active_part_name, assigned_operator) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id.trim(), name.trim(), department.trim(), parseInt(target) || 500, parseInt(ideal_cycle_time) || 15, active_part_name || 'Unassigned', assigned_operator || 'Unassigned']
+      'INSERT INTO machines (id, name, department, target, ideal_cycle_time, active_part_name, assigned_operator, iot_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id.trim(), name.trim(), department.trim(), parseInt(target) || 500, parseInt(ideal_cycle_time) || 15, active_part_name || 'Unassigned', assigned_operator || 'Unassigned', Boolean(iot_enabled)]
     );
     await recordAuditLog(req.user.loginId, 'MACHINE_CREATE', id);
 
@@ -422,7 +425,7 @@ router.post('/machines', requireAuth, requireRole('Admin'), async (req, res) => 
 
 router.put('/machines/:id', requireAuth, requireRole('Admin'), async (req, res) => {
   const machineId = req.params.id;
-  const { name, department, target, ideal_cycle_time } = req.body;
+  const { name, department, target, ideal_cycle_time, iot_enabled } = req.body;
 
   if (!name || !department || target === undefined || ideal_cycle_time === undefined) {
     return res.status(400).json({ error: 'name, department, target, and ideal_cycle_time are required' });
@@ -430,8 +433,8 @@ router.put('/machines/:id', requireAuth, requireRole('Admin'), async (req, res) 
 
   try {
     await db.query(
-      'UPDATE machines SET name = ?, department = ?, target = ?, ideal_cycle_time = ? WHERE id = ?',
-      [name.trim(), department.trim(), parseInt(target), parseInt(ideal_cycle_time), machineId]
+      'UPDATE machines SET name = ?, department = ?, target = ?, ideal_cycle_time = ?, iot_enabled = ? WHERE id = ?',
+      [name.trim(), department.trim(), parseInt(target), parseInt(ideal_cycle_time), Boolean(iot_enabled), machineId]
     );
     await recordAuditLog(req.user.loginId, 'MACHINE_UPDATE', machineId);
 
@@ -538,6 +541,51 @@ router.delete('/users/:loginId', requireAuth, requireRole('Admin'), async (req, 
   } catch (err) {
     logger.error('API Error: DELETE /users:', err.message);
     res.status(500).json({ error: 'Failed to delete user profile' });
+  }
+});
+
+/**
+ * GET /api/operator-availability?date&shift - who's already assigned to which machine for that
+ * (plan_date, shift), across every machine. There is no fixed operator roster - the Supervisor
+ * types an operator's name directly into the Assign form each time (creating a full User Profile
+ * account per operator isn't realistic on a shop floor), so this endpoint just reflects the
+ * part_schedules.operator values already saved, purely so the Supervisor can see who's already
+ * taken before typing a name (the actual double-booking rejection still happens server-side in
+ * POST /part-schedules/assign-operator, this is only the at-a-glance view).
+ */
+router.get('/operator-availability', requireAuth, requireRole('Supervisor', 'Admin'), async (req, res) => {
+  const { date, shift } = req.query;
+  if (!date || !shift) {
+    return res.status(400).json({ error: 'date and shift query params are required' });
+  }
+
+  try {
+    const [entries] = await db.query(
+      'SELECT machine_id, operator FROM part_schedules WHERE plan_date = ? AND shift = ? AND operator IS NOT NULL',
+      [date, shift]
+    );
+    const [machines] = await db.query('SELECT id, name FROM machines');
+    const machineNameById = new Map(machines.map((m) => [m.id, m.name]));
+
+    // A machine can have several part_schedules entries (multiple parts) in one shift, all
+    // assigned the same operator together (see POST /part-schedules/assign-operator below) - any
+    // one matching entry is enough to know which machine this operator name is on this shift.
+    const seenOperators = new Set();
+    const assignments = [];
+    entries.forEach((e) => {
+      if (seenOperators.has(e.operator)) return;
+      seenOperators.add(e.operator);
+      assignments.push({
+        operatorName: e.operator,
+        machineId: e.machine_id,
+        machineName: machineNameById.get(e.machine_id) || e.machine_id
+      });
+    });
+
+    res.json({ date, shift, assignments });
+  } catch (err) {
+    logger.error('API Error: GET /operator-availability:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve operator availability' });
   }
 });
 
@@ -706,7 +754,7 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
       }
     }
 
-    // Self-heal a machine the cloud believes is Stopped/No Signal but that just proved via a
+    // Self-heal a machine the cloud believes is Stopped/Not Connected but that just proved via a
     // real pulse it's actually Running - this is what recovers a machine from a false auto-stop
     // the Cloud's own watchdog previously wrote (see watchdogService.js: the Cloud has no
     // low-latency signal of its own and used to force machines.status to Stopped purely because

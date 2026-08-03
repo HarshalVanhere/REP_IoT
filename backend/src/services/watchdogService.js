@@ -188,6 +188,25 @@ export function startWatchdogService(broadcast) {
     }
 
     try {
+      // A machine with iot_enabled = FALSE has no ESP32/Raspberry Pi wired up at all - it will
+      // never produce a real pulse or status message, so nothing else in this codebase will ever
+      // move it off whatever status it's stuck at. Force it to "Not Connected" on every tick
+      // (both tiers, since this needs no physical serial access - just reflecting a registration
+      // fact) so it can never be left showing a stale Running/Stopped state from before an Admin
+      // disabled it, or the DB default before this feature existed.
+      const [unconnectedMachines] = await db.query(
+        "SELECT id, status FROM machines WHERE iot_enabled = FALSE AND status != 'Not Connected'"
+      );
+      for (const machine of unconnectedMachines) {
+        await withMachineLock(machine.id, async () => {
+          await handleStatusMessage(machine.id, 'Not Connected');
+        });
+      }
+    } catch (err) {
+      logger.error('Watchdog Service Error (connectivity enforcement):', err.message);
+    }
+
+    try {
       // Find all machines that are currently marked as Running, along with when the
       // current Running period actually started (the open status_logs row).
       const [machines] = await db.query(`
@@ -221,8 +240,10 @@ export function startWatchdogService(broadcast) {
         const baseTime = Math.max(lastPulseTime, runningSinceTime);
         const secondsSinceLastPulse = (now.getTime() - baseTime) / 1000;
 
-        // Threshold is the ideal cycle time plus a 2 minute (120 second) grace period
-        const threshold = machine.ideal_cycle_time + 120;
+        // Threshold is the machine's own configured heartbeat timeout (Admin-editable per
+        // machine), falling back to the legacy ideal-cycle-time-plus-2-minutes grace period only
+        // for machines that predate this column.
+        const threshold = machine.heartbeat_timeout_seconds || (machine.ideal_cycle_time + 120);
 
         if (secondsSinceLastPulse > threshold) {
           // On the Cloud, last_pulse only advances when the Edge Gateway's HTTP sync loop
@@ -237,7 +258,7 @@ export function startWatchdogService(broadcast) {
           // Cloud only ever gets to flag this as a sync-lag warning; the Edge Gateway is the
           // sole authority allowed to actually stop the machine.
           if (process.env.IS_EDGE_GATEWAY === 'true') {
-            logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Stopped.`);
+            logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Not Connected.`);
 
             // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
             // this can never fire in the middle of - or immediately undo - an operator action or
@@ -250,9 +271,12 @@ export function startWatchdogService(broadcast) {
                 logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
               }
 
-              // Force-transition status to Stopped (closes running log and creates stopped log,
-              // and - see handleStatusMessage - stamps last_cycle_reset_at so Last Cycle reads 0)
-              await handleStatusMessage(machine.id, 'Stopped');
+              // Force-transition status to Not Connected (closes running log and creates a Not
+              // Connected log, and - see handleStatusMessage - stamps last_cycle_reset_at so Last
+              // Cycle reads 0). Not "Stopped" - a machine that stopped sending heartbeats was not
+              // necessarily manually stopped, and conflating the two hid genuine connectivity
+              // loss behind a normal-looking Stopped state.
+              await handleStatusMessage(machine.id, 'Not Connected');
             });
 
             if (shouldEmitAlert(`${machine.id}:stale`)) {
@@ -260,7 +284,7 @@ export function startWatchdogService(broadcast) {
                 severity: 'critical',
                 machineId: machine.id,
                 machineName: machine.name,
-                message: `${machine.name} auto-stopped: no signal for ${Math.round(secondsSinceLastPulse)}s`
+                message: `${machine.name} marked Not Connected: no signal for ${Math.round(secondsSinceLastPulse)}s`
               });
             }
           } else {

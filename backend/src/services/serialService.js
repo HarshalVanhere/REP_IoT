@@ -62,7 +62,7 @@ function connectSerial(portPath, baudRate) {
   portInstance.open(async (err) => {
     if (err) {
       logger.warn(`Serial: Failed to open port ${portPath}: ${err.message}. Retrying in 5 seconds...`);
-      await handleStatusMessage(gatewayMachineId, "No Signal");
+      await handleStatusMessage(gatewayMachineId, "Not Connected");
       scheduleReconnect(portPath, baudRate);
       return;
     }
@@ -134,7 +134,7 @@ function connectSerial(portPath, baudRate) {
   // Handle port close
   portInstance.on('close', async () => {
     logger.warn(`Serial: Port ${portPath} closed. Attempting reconnect in 5 seconds...`);
-    await handleStatusMessage(gatewayMachineId, "No Signal");
+    await handleStatusMessage(gatewayMachineId, "Not Connected");
     scheduleReconnect(portPath, baudRate);
   });
 

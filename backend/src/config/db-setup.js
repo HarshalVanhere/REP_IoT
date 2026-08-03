@@ -42,7 +42,7 @@ async function setup() {
         id VARCHAR(50) PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         department VARCHAR(50) NOT NULL,
-        status VARCHAR(50) NOT NULL DEFAULT 'No Signal',
+        status VARCHAR(50) NOT NULL DEFAULT 'Not Connected',
         target INT NOT NULL DEFAULT 500,
         production_count INT NOT NULL DEFAULT 0,
         good_count INT NOT NULL DEFAULT 0,
@@ -229,6 +229,27 @@ async function setup() {
     } catch (err) {
       // Ignore if column already exists
     }
+    // Connectivity: iot_enabled marks a machine as physically wired to an ESP32/Raspberry Pi.
+    // A machine with iot_enabled = FALSE never receives real pulses/status - it must always
+    // read "Not Connected", never a fabricated Running/Stopped/OEE state. heartbeat_timeout_seconds
+    // is the per-machine override for how long a *connected* machine can go without a pulse
+    // before the watchdog (see watchdogService.js) also declares it Not Connected.
+    try {
+      await connection.query('ALTER TABLE machines ADD COLUMN iot_enabled BOOLEAN NOT NULL DEFAULT FALSE');
+      console.log('   + Added "iot_enabled" column to machines table');
+      // See the matching backfill in db.js - every pre-existing machine was already being
+      // treated as physically connected before this column existed.
+      await connection.query('UPDATE machines SET iot_enabled = TRUE');
+      console.log('   + Backfilled "iot_enabled" = TRUE on all pre-existing machines');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
+      await connection.query('ALTER TABLE machines ADD COLUMN heartbeat_timeout_seconds INT NOT NULL DEFAULT 120');
+      console.log('   + Added "heartbeat_timeout_seconds" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
     try {
       await connection.query('ALTER TABLE pulses ADD COLUMN part_schedule_id INT NULL');
       console.log('   + Added "part_schedule_id" column to pulses table');
@@ -248,6 +269,25 @@ async function setup() {
       try {
         await connection.query(`ALTER TABLE production_records ADD COLUMN ${column} ${definition}`);
         console.log(`   + Added "${column}" column to production_records table`);
+      } catch (err) {
+        // Ignore if column already exists
+      }
+    }
+
+    // No Part Master catalog and no Admin-configured default allowance - the PPC Engineer types
+    // Part Number, Part Name, Part Operation, Ideal Cycle Time, and the Loading/Unloading
+    // Allowance directly on every schedule entry. part_id/parts/production_settings (an earlier
+    // catalog-based design) are no longer written to by any route; these columns just add the
+    // manually-entered fields that replace them.
+    const partScheduleManualEntryColumns = [
+      ['part_number', 'VARCHAR(50) NULL'],
+      ['part_operation', 'VARCHAR(150) NULL'],
+      ['load_unload_allowance_seconds', 'INT NULL']
+    ];
+    for (const [column, definition] of partScheduleManualEntryColumns) {
+      try {
+        await connection.query(`ALTER TABLE part_schedules ADD COLUMN ${column} ${definition}`);
+        console.log(`   + Added "${column}" column to part_schedules table`);
       } catch (err) {
         // Ignore if column already exists
       }

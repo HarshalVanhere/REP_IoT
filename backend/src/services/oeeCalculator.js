@@ -1,41 +1,53 @@
 import db from '../config/db.js';
 import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
-import { getShiftForTimestamp, getCurrentShiftStart } from '../config/shifts.js';
+import { getShiftForTimestamp, getCurrentShiftStart, getShiftWindow, buildPlantDateTime } from '../config/shifts.js';
 
 export { PREDEFINED_REASONS };
+
+/**
+ * Planned-break treatment rules - the single reference for which calculations exclude planned
+ * breaks (Tea/Lunch/Dinner, see getPlannedBreaks below) from their time base, and which don't:
+ *
+ *   - Production Target (calculateAutoTarget): EXCLUDES breaks - available production time is
+ *     the scheduled window minus any break falling inside it.
+ *   - Availability (computeOeeFromTotals): EXCLUDES breaks - denominator is Planned Production
+ *     Time, itself window duration minus break seconds.
+ *   - Performance, Quality: unaffected either way - both are ratios of counts/Operating Time,
+ *     never of window duration.
+ *   - OEE: inherits Availability's break-exclusion transitively (OEE = A x P x Q).
+ *   - Machine Utilization: the one deliberate exception - INCLUDES breaks (Running Time / raw
+ *     window duration). This is a broader "how much of the clock was this machine adding value"
+ *     KPI, intentionally distinct from TPM Availability.
+ */
 
 /**
  * Returns planned break intervals for today
  */
 export function getPlannedBreaks(midnight) {
   const breaks = [];
-  
-  // Shift C Break: Tea (03:00 - 03:20)
-  breaks.push({
-    start: new Date(midnight.getTime() + 3 * 3600000),
-    end: new Date(midnight.getTime() + (3 * 3600000 + 20 * 60000))
-  });
-  
-  // Shift A Breaks: Tea (10:00 - 10:20), Lunch (12:30 - 13:00)
-  breaks.push({
-    start: new Date(midnight.getTime() + 10 * 3600000),
-    end: new Date(midnight.getTime() + (10 * 3600000 + 20 * 60000))
-  });
-  breaks.push({
-    start: new Date(midnight.getTime() + 12.5 * 3600000),
-    end: new Date(midnight.getTime() + 13 * 3600000)
-  });
-  
-  // Shift B Breaks: Tea (18:30 - 18:50), Dinner (20:30 - 21:00)
-  breaks.push({
-    start: new Date(midnight.getTime() + 18.5 * 3600000),
-    end: new Date(midnight.getTime() + (18.5 * 3600000 + 20 * 60000))
-  });
-  breaks.push({
-    start: new Date(midnight.getTime() + 20.5 * 3600000),
-    end: new Date(midnight.getTime() + 21 * 3600000)
-  });
-  
+
+  // start/end given as minutes-from-midnight, converted to ms offsets from `midnight`.
+  const addBreak = (startMinutes, endMinutes) => {
+    breaks.push({
+      start: new Date(midnight.getTime() + startMinutes * 60000),
+      end: new Date(midnight.getTime() + endMinutes * 60000)
+    });
+  };
+
+  // Shift C Breaks: Tea (02:00 - 02:10), Tea (05:00 - 05:10)
+  addBreak(2 * 60, 2 * 60 + 10);
+  addBreak(5 * 60, 5 * 60 + 10);
+
+  // Shift A Breaks: Tea (09:00 - 09:10), Lunch (11:30 - 12:00), Tea (14:00 - 14:10)
+  addBreak(9 * 60, 9 * 60 + 10);
+  addBreak(11 * 60 + 30, 12 * 60);
+  addBreak(14 * 60, 14 * 60 + 10);
+
+  // Shift B Breaks: Tea (17:30 - 17:40), Dinner (20:00 - 20:30), Tea (21:30 - 21:40)
+  addBreak(17 * 60 + 30, 17 * 60 + 40);
+  addBreak(20 * 60, 20 * 60 + 30);
+  addBreak(21 * 60 + 30, 21 * 60 + 40);
+
   return breaks;
 }
 
@@ -50,7 +62,7 @@ export function getIntervalOverlapSeconds(start1, end1, start2, end2) {
 
 /**
  * Clips a set of status_logs rows to [windowStart, windowEnd], subtracts any overlap with the
- * given planned breaks, and buckets the remaining duration into Running/Stopped/No Signal
+ * given planned breaks, and buckets the remaining duration into Running/Stopped/Not Connected
  * totals (plus downtime-by-reason). Shared by the live "since midnight" calculation below and
  * reportingService.js's arbitrary historical windows, so the two can never compute utilization
  * differently.
@@ -88,7 +100,7 @@ export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
       } else {
         downtimeReasons['Other'] += durationSeconds;
       }
-    } else if (log.status === 'No Signal') {
+    } else if (log.status === 'Not Connected') {
       noSignalSeconds += durationSeconds;
     }
   });
@@ -129,6 +141,40 @@ export function computeOeeFromTotals({ plannedSeconds, operatingSeconds, totalCo
 }
 
 /**
+ * Automatic production target for one scheduled part_schedules entry - the single formula
+ * behind "PPC never manually enters a target quantity":
+ *
+ *   Effective Cycle Time = Ideal Cycle Time + Loading/Unloading Allowance (both typed directly
+ *                           by the PPC Engineer on this entry - no catalog, no global default)
+ *   Available Time       = the entry's own [planned_start, planned_end) window, minus any
+ *                           planned break (Tea/Lunch/Dinner) that falls inside it
+ *   Target                = floor(Available Time / Effective Cycle Time)
+ *
+ * Uses the entry's OWN window, not the whole shift - this is what makes multiple sequential
+ * parts within one shift (e.g. 08:00-12:00 Part A, 13:00-17:00 Part B) each get their own
+ * independently-correct target with zero shared state between them. Math.floor, never round up -
+ * a target the available time can't actually fit would be a promise the shift can't keep.
+ */
+export function calculateAutoTarget({ planDate, plannedStart, plannedEnd, idealCycleTime, loadUnloadAllowanceSeconds }) {
+  const entryStart = buildPlantDateTime(planDate, plannedStart);
+  let entryEnd = buildPlantDateTime(planDate, plannedEnd);
+  // A window ending at midnight (e.g. Shift B's planned_end stored as "00:00:00") means midnight
+  // of the FOLLOWING day, not the start of planDate itself - roll it forward a day so the
+  // duration comes out positive instead of clamping to 0 available seconds.
+  if (entryEnd.getTime() <= entryStart.getTime()) {
+    entryEnd = new Date(entryEnd.getTime() + 24 * 3600000);
+  }
+  const midnight = getShiftWindow(planDate, 'Shift C').start;
+  const breaks = getPlannedBreaks(midnight);
+  const breakSeconds = breaks.reduce((s, b) => s + getIntervalOverlapSeconds(entryStart, entryEnd, b.start, b.end), 0);
+  const availableSeconds = Math.max(0, (entryEnd.getTime() - entryStart.getTime()) / 1000 - breakSeconds);
+  const effectiveCycleTime = idealCycleTime + loadUnloadAllowanceSeconds;
+  const target = effectiveCycleTime > 0 ? Math.floor(availableSeconds / effectiveCycleTime) : 0;
+
+  return { availableSeconds, effectiveCycleTime, target };
+}
+
+/**
  * Calculates Availability, Performance, Quality, OEE, shifts count,
  * machine utilization, downtime reasons, and last cycle time.
  */
@@ -148,6 +194,30 @@ export async function calculateOEE(machineId) {
       throw new Error(`Machine ${machineId} not found`);
     }
     const machine = machines[0];
+
+    // A machine with no ESP32/Raspberry Pi wired up (iot_enabled = FALSE) - or one that IS
+    // wired up but has lost signal past its heartbeat timeout (status forced to 'Not Connected'
+    // by the watchdog, see watchdogService.js) - must never report a fabricated Running/Stopped/
+    // OEE reading. `null`, not 0, so callers can tell "genuinely 0%" apart from "not applicable"
+    // and know to suppress the gauge/meters entirely rather than render a misleading percentage.
+    if (!machine.iot_enabled || machine.status === 'Not Connected') {
+      return {
+        connected: false,
+        availability: null,
+        performance: null,
+        quality: null,
+        oee: null,
+        downtimeSeconds: null,
+        shiftElapsedSeconds: null,
+        machineUtilization: null,
+        lastCycleTime: null,
+        currentShift: getShiftForTimestamp(now),
+        shifts: { A: 0, B: 0, C: 0 },
+        utilization: null,
+        downtimeReasons: null
+      };
+    }
+
     const idealCycleTime = machine.ideal_cycle_time;
     const totalCount = machine.production_count;
     const goodCount = machine.good_count;

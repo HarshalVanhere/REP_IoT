@@ -391,11 +391,18 @@ export async function buildOeeReportRows(machineId, startDate, endDate, { shift,
   const effectiveGroupBy = groupBy === 'day' || groupBy === 'shift' ? groupBy : (dates.length > 1 ? 'day' : 'shift');
 
   const [machineRows] = await db.query(
-    'SELECT id, name, ideal_cycle_time, assigned_operator FROM machines WHERE id = ?',
+    'SELECT id, name, ideal_cycle_time, assigned_operator, iot_enabled FROM machines WHERE id = ?',
     [machineId]
   );
   const machineName = machineRows.length > 0 ? machineRows[0].name : machineId;
   const machineDefault = machineRows[0] || {};
+
+  // A machine with no ESP32/Raspberry Pi wired up has never produced a real pulse/status_log -
+  // there is nothing to query. Short-circuit before touching pulses/status_logs at all, rather
+  // than running the whole date-range walk just to land on all-zero rows.
+  if (machineRows.length > 0 && !machineRows[0].iot_enabled) {
+    return { machineId, machineName, startDate, endDate, groupBy: groupBy || 'day', connected: false, kpis: null, rows: [] };
+  }
 
   const now = Date.now();
   const rangeStart = getShiftWindow(dates[0], 'Shift C').start;
@@ -500,7 +507,7 @@ function groupDowntimeEvents(events, groupBy) {
  * a machine over [startDate, endDate]. status_before/status_after are read off the neighboring
  * status_logs rows for the same machine - safe because ensureActiveStatusLog() (mqttService.js)
  * guarantees at most one open log per machine at any time, so Stopped rows are always bounded
- * by a Running/No Signal row on each side.
+ * by a Running/Not Connected row on each side.
  */
 /**
  * Planned production seconds for one calendar date - the whole day (minus that day's breaks)
@@ -528,8 +535,13 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
   const rangeStart = getShiftWindow(dates[0], 'Shift C').start;
   const rangeEnd = new Date(getShiftWindow(dates[dates.length - 1], 'Shift C').start.getTime() + 24 * 3600000);
 
-  const [machineRows] = await db.query('SELECT id, name FROM machines WHERE id = ?', [machineId]);
+  const [machineRows] = await db.query('SELECT id, name, iot_enabled FROM machines WHERE id = ?', [machineId]);
   const machineName = machineRows.length > 0 ? machineRows[0].name : machineId;
+
+  // No physically-wired device, no real status_logs to query - see buildOeeReportRows above.
+  if (machineRows.length > 0 && !machineRows[0].iot_enabled) {
+    return { machineId, machineName, startDate, endDate, groupBy, shift: shift || null, operator: operator || null, partName: partName || null, connected: false, kpis: null, groups: [], events: [] };
+  }
 
   const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
   const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));

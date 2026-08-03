@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, ResponsiveContainer } from 'recharts';
-import { Play, Ban, AlertTriangle, Clock, Target, RotateCcw } from 'lucide-react';
+import { Play, Ban, AlertTriangle, WifiOff, Clock, Target, RotateCcw } from 'lucide-react';
+import { isConnected } from '../lib/connectivity';
 
 export default function MachineCard({ machine, history = [], canResetCount = false, onResetCount }) {
   const { id, name, status, target, production_count, ideal_cycle_time, last_pulse, metrics, active_part_name, assigned_operator } = machine;
   const { availability = 100, performance = 0, quality = 100, oee = 0, downtimeSeconds = 0 } = metrics || {};
+  const connected = isConnected(machine);
 
   const [cycleTimer, setCycleTimer] = useState(0);
 
@@ -132,6 +134,21 @@ export default function MachineCard({ machine, history = [], canResetCount = fal
         )}
       </div>
 
+      {!connected ? (
+        // Not Connected: no ESP32/Raspberry Pi wired up (or signal lost past its heartbeat
+        // timeout) - never render a gauge, A/P/Q meter, or target-progress bar here, since none
+        // of those numbers are real for a machine with no live telemetry.
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 py-10 text-center bg-slate-50 rounded-xl border border-slate-200/60 mb-4">
+          <WifiOff className="w-10 h-10 text-slate-300" />
+          <div>
+            <p className="text-sm font-black uppercase tracking-wider text-slate-400">Not Connected</p>
+            <p className="text-[11px] font-bold text-slate-350 mt-1 max-w-[220px]">
+              No IoT device linked to this machine yet - production and OEE data are unavailable.
+            </p>
+          </div>
+        </div>
+      ) : (
+      <>
       {/* 2. Top Half: Gauges and Cycle stopwatch */}
       <div className="grid grid-cols-12 gap-3 items-center mb-4">
         {/* Left Side: Radial OEE Gauge */}
@@ -255,10 +272,12 @@ export default function MachineCard({ machine, history = [], canResetCount = fal
           </div>
         </div>
       </div>
+      </>
+      )}
 
       {/* 5. Bottom Section: Mini Pulse History Sparkline */}
       <div className="h-10 mt-auto border-t border-slate-100 pt-2.5 flex flex-col justify-end">
-        {history.length > 0 ? (
+        {connected && history.length > 0 ? (
           <div className="w-full h-8 relative">
             <div className="absolute top-0 left-0 text-[10px] font-black text-slate-400 tracking-wider">CYCLE SPARKLINE</div>
             <ResponsiveContainer width="100%" height="100%">

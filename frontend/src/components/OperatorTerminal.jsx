@@ -4,13 +4,6 @@ import DowntimeReasonModal from './DowntimeReasonModal';
 import jbmLogo from '../assets/jbmlogo (1).png';
 import roseLogo from '../assets/rose logo (1).png';
 
-const SIMULATED_OPERATORS = [
-  { id: 'OP-101', name: 'Harsh (Operator 101)' },
-  { id: 'OP-102', name: 'Suresh (Operator 102)' },
-  { id: 'OP-103', name: 'Rahul (Operator 103)' },
-  { id: 'OP-104', name: 'Amit (Operator 104)' }
-];
-
 export default function OperatorTerminal({
   machines,
   onStopMachine,
@@ -35,7 +28,7 @@ export default function OperatorTerminal({
 
   // Find active selected machine
   const machine = machines.find(m => m.id === selectedId) || {};
-  const { name = '1313 ACE CNC SUPER JOBBER', status = 'No Signal', target = 500, production_count = 0, last_pulse, ideal_cycle_time = 12, metrics, assigned_operator, active_part_name, active_schedule_id } = machine;
+  const { name = '1313 ACE CNC SUPER JOBBER', status = 'Not Connected', target = 500, production_count = 0, last_pulse, ideal_cycle_time = 12, metrics, assigned_operator, active_part_name, active_schedule_id } = machine;
   const { lastCycleTime = 0, currentShift = 'Shift A' } = metrics || {};
   const achievementRate = target > 0 ? (production_count / target) * 100 : 0;
   // No part scheduled for this machine right now - production must never start (or continue
@@ -124,9 +117,10 @@ export default function OperatorTerminal({
 
   const handleLoginSubmit = (e) => {
     e.preventDefault();
-    if (!operatorId) return;
-    setLoggedInOperator(operatorId);
-    window.localStorage.setItem('mes-logged-operator', operatorId);
+    const trimmedId = operatorId.trim();
+    if (!trimmedId) return;
+    setLoggedInOperator(trimmedId);
+    window.localStorage.setItem('mes-logged-operator', trimmedId);
   };
 
   const handleLogout = () => {
@@ -203,7 +197,7 @@ export default function OperatorTerminal({
                 }}
                 className="w-full bg-gradient-to-r from-sky-500 to-sky-600 hover:from-sky-400 hover:to-sky-500 text-white font-extrabold text-lg tracking-wide uppercase py-4 rounded-2xl border-2 border-sky-400/40 shadow-2xl shadow-sky-950/60 transition-all active:scale-95 cursor-pointer"
               >
-                Confirm & Sign On
+                Confirm and Sign In
               </button>
               <button
                 onClick={() => setShowManualLogin(true)}
@@ -214,29 +208,29 @@ export default function OperatorTerminal({
             </div>
           </div>
         ) : (
-          // MANUAL SELECTOR DROPDOWN LOGIN MODE
+          // MANUAL OPERATOR ID ENTRY LOGIN MODE - no hardcoded operator roster; the operator
+          // types their own badge ID, matching how PPC-assigned IDs (e.g. OP-105, SUP-205) are
+          // free-form elsewhere in this system (see User Management), not a fixed local list.
           <div className="flex-1 flex flex-col items-center justify-center p-4 text-center animate-in fade-in duration-300 relative z-10">
             <h3 className="text-4xl font-black text-slate-100 uppercase tracking-wide">MES Terminal Sign-In</h3>
-            <p className="text-lg text-slate-400 mt-2 max-w-2xl uppercase font-bold tracking-wide">Select operator profile to unlock workstation controls</p>
+            <p className="text-lg text-slate-400 mt-2 max-w-2xl uppercase font-bold tracking-wide">Enter your operator ID to unlock workstation controls</p>
 
             <form onSubmit={handleLoginSubmit} className="mt-8 flex flex-col gap-4 w-full max-w-xl">
-              <select
+              <input
+                type="text"
                 value={operatorId}
-                onChange={(e) => setOperatorId(e.target.value)}
-                className="w-full bg-slate-900 border-2 border-slate-800 hover:border-slate-700 text-slate-100 rounded-2xl py-5 px-5 text-xl font-bold uppercase transition-all outline-none"
-              >
-                <option value="">Select operator badge...</option>
-                {SIMULATED_OPERATORS.map(op => (
-                  <option key={op.id} value={op.id}>{op.id} - {op.name}</option>
-                ))}
-              </select>
+                onChange={(e) => setOperatorId(e.target.value.toUpperCase())}
+                placeholder="e.g. OP-105"
+                autoFocus
+                className="w-full bg-slate-900 border-2 border-slate-800 hover:border-slate-700 text-slate-100 rounded-2xl py-5 px-5 text-xl font-bold uppercase text-center tracking-widest transition-all outline-none placeholder:text-slate-600"
+              />
 
               <button
                 type="submit"
-                disabled={!operatorId}
+                disabled={!operatorId.trim()}
                 className="w-full bg-gradient-to-r from-sky-500 to-sky-600 hover:from-sky-400 hover:to-sky-500 disabled:opacity-50 text-white font-extrabold text-xl tracking-wide uppercase py-6 rounded-3xl border-2 border-sky-400/40 shadow-2xl shadow-sky-950/60 transition-all active:scale-95 cursor-pointer"
               >
-                Login to Workstation
+                Confirm and Sign In
               </button>
             </form>
           </div>
@@ -262,7 +256,7 @@ export default function OperatorTerminal({
               {/* Status Badge */}
               <div className={`border-2 rounded-xl px-3 py-2 flex items-center gap-1.5 text-sm font-black uppercase tracking-wide shrink-0 shadow-lg bg-gradient-to-br ${statusTheme.grad} to-slate-900 ${statusTheme.border} ${statusTheme.text}`}>
                 <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${status === 'Running' ? 'bg-emerald-400 animate-pulse' : status === 'Stopped' ? 'bg-rose-500' : 'bg-violet-500 animate-pulse'}`}></span>
-                <span>{status === 'Running' ? 'RUNNING' : status === 'Stopped' ? 'STOPPED' : 'NO SIGNAL'}</span>
+                <span>{status === 'Running' ? 'RUNNING' : status === 'Stopped' ? 'STOPPED' : 'NOT CONNECTED'}</span>
               </div>
 
               {/* Signout Button */}
@@ -441,7 +435,7 @@ export default function OperatorTerminal({
             ) : (
               <button
                 onClick={handleStartClick}
-                disabled={status === 'No Signal' || !hasSchedule}
+                disabled={status === 'Not Connected' || !hasSchedule}
                 title={!hasSchedule ? 'No part is scheduled. Please schedule the part first from the PPC Engineer login.' : undefined}
                 className="w-full bg-gradient-to-r from-emerald-500 to-emerald-700 hover:from-emerald-400 hover:to-emerald-600 disabled:opacity-50 text-white font-black text-4xl tracking-widest uppercase py-8 rounded-3xl border-4 border-emerald-300/40 shadow-2xl shadow-emerald-950/60 flex items-center justify-center gap-5 transition-all active:scale-[0.98] cursor-pointer animate-in fade-in"
               >

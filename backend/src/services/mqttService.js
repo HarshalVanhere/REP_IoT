@@ -158,7 +158,7 @@ export async function handlePulseMessage(machineId, payload) {
  * Handles status updates from machines
  */
 export async function handleStatusMessage(machineId, status) {
-  if (!['Running', 'Stopped', 'No Signal'].includes(status)) {
+  if (!['Running', 'Stopped', 'Not Connected'].includes(status)) {
     logger.warn(`Invalid status status received for ${machineId}: ${status}`);
     return;
   }

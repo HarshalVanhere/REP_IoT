@@ -225,7 +225,7 @@ export default function ReportsLog({ reports = [], machines = [], currentUser, o
           onChange={(e) => setStatusFilter(e.target.value)}
           className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5 text-base font-bold text-slate-700 outline-none transition focus:border-sky-500 focus:bg-white"
         >
-          {['All', 'Running', 'Stopped', 'No Signal'].map((option) => <option key={option} value={option}>{option}</option>)}
+          {['All', 'Running', 'Stopped', 'Not Connected'].map((option) => <option key={option} value={option}>{option}</option>)}
         </select>
 
         <select

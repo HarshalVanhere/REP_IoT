@@ -3,7 +3,7 @@ import { Cpu, Plus, Trash2, Pencil, X } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { useToast } from './Toast';
 
-const emptyForm = { id: '', name: '', department: '', target: 500, ideal_cycle_time: 15 };
+const emptyForm = { id: '', name: '', department: '', target: 500, ideal_cycle_time: 15, iot_enabled: false };
 
 export default function MachineManagement({ machines, authToken, onRefresh, onAuthError }) {
   const { showToast } = useToast();
@@ -19,7 +19,7 @@ export default function MachineManagement({ machines, authToken, onRefresh, onAu
   };
 
   const openEditForm = (machine) => {
-    setForm({ id: machine.id, name: machine.name, department: machine.department, target: machine.target, ideal_cycle_time: machine.ideal_cycle_time });
+    setForm({ id: machine.id, name: machine.name, department: machine.department, target: machine.target, ideal_cycle_time: machine.ideal_cycle_time, iot_enabled: Boolean(machine.iot_enabled) });
     setEditingId(machine.id);
     setFormOpen(true);
   };
@@ -35,7 +35,7 @@ export default function MachineManagement({ machines, authToken, onRefresh, onAu
         await apiFetch(`/api/machines/${editingId}`, {
           method: 'PUT',
           token: authToken,
-          body: { name: form.name, department: form.department, target: form.target, ideal_cycle_time: form.ideal_cycle_time }
+          body: { name: form.name, department: form.department, target: form.target, ideal_cycle_time: form.ideal_cycle_time, iot_enabled: form.iot_enabled }
         });
         showToast(`Machine ${editingId} updated.`, 'success');
       } else {
@@ -92,6 +92,7 @@ export default function MachineManagement({ machines, authToken, onRefresh, onAu
               <th className="py-3 px-2">Department</th>
               <th className="py-3 px-2 text-right">Target</th>
               <th className="py-3 px-2 text-right">Ideal Cycle</th>
+              <th className="py-3 px-2 text-center">Connectivity</th>
               <th className="py-3 px-2 text-right">Actions</th>
             </tr>
           </thead>
@@ -103,6 +104,11 @@ export default function MachineManagement({ machines, authToken, onRefresh, onAu
                 <td className="py-3 px-2 text-xs">{m.department}</td>
                 <td className="py-3 px-2 text-right font-mono">{m.target}</td>
                 <td className="py-3 px-2 text-right font-mono">{m.ideal_cycle_time}s</td>
+                <td className="py-3 px-2 text-center">
+                  <span className={`px-2 py-1 rounded-full text-[10px] font-black uppercase ${m.iot_enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                    {m.iot_enabled ? 'IoT Wired' : 'Not Wired'}
+                  </span>
+                </td>
                 <td className="py-3 px-2 text-right space-x-2">
                   <button onClick={() => openEditForm(m)} className="text-xs font-black uppercase text-[var(--primary)] hover:underline inline-flex items-center gap-1">
                     <Pencil className="w-3.5 h-3.5" /> Edit
@@ -115,7 +121,7 @@ export default function MachineManagement({ machines, authToken, onRefresh, onAu
             ))}
             {machines.length === 0 && (
               <tr>
-                <td colSpan="6" className="text-center py-12 text-slate-400 uppercase tracking-widest font-black text-xs">No machines configured</td>
+                <td colSpan="7" className="text-center py-12 text-slate-400 uppercase tracking-widest font-black text-xs">No machines configured</td>
               </tr>
             )}
           </tbody>
@@ -181,6 +187,20 @@ export default function MachineManagement({ machines, authToken, onRefresh, onAu
                   />
                 </div>
               </div>
+              <label className="flex items-center gap-2.5 bg-[var(--bg-color-page)] border border-[var(--grey-200)] rounded-xl py-2.5 px-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.iot_enabled}
+                  onChange={(e) => setForm({ ...form, iot_enabled: e.target.checked })}
+                  className="w-4 h-4 accent-[var(--primary)]"
+                />
+                <span className="text-[11px] font-black uppercase tracking-wider text-slate-600">
+                  Physically connected to ESP32 / Raspberry Pi
+                </span>
+              </label>
+              <p className="text-[10px] text-slate-400 font-semibold leading-snug px-0.5">
+                Leave unchecked until this machine's IoT hardware is actually wired up - it will show "Not Connected" everywhere and be excluded from all OEE/production KPIs until this is checked.
+              </p>
               <button
                 type="submit"
                 className="w-full bg-[var(--primary)] text-white text-xs font-black uppercase tracking-wider py-3 rounded-xl transition active:scale-95 mt-2"

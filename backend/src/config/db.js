@@ -33,7 +33,10 @@ const mockDb = {
   part_schedules: []
 };
 
-mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; m.last_manual_reset_at = null; m.last_cycle_reset_at = null; });
+// All seeded demo machines are treated as already physically wired up (iot_enabled = true) so
+// the existing mock-mode live/report demo data keeps working unchanged - a newly Admin-created
+// machine defaults iot_enabled = false (see partMaster/machines POST route) until connected.
+mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; m.last_manual_reset_at = null; m.last_cycle_reset_at = null; m.iot_enabled = true; m.heartbeat_timeout_seconds = 120; });
 
 let mockPulseId = 1;
 let mockLogId = 1;
@@ -50,7 +53,13 @@ function seedMockData() {
   mockDb.users = [
     { loginId: 'SUP-201', role: 'Supervisor', displayName: 'Supervisor User', terminalId: 'DASHBOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
     { loginId: 'PPC-301', role: 'PPC Engineer', displayName: 'PPC Engineer', terminalId: 'PLANNING-BOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
-    { loginId: 'ADMIN', role: 'Admin', displayName: 'Admin User', terminalId: 'CONTROL-ROOM', password_hash: DEFAULT_SEED_PASSWORD_HASH }
+    { loginId: 'ADMIN', role: 'Admin', displayName: 'Admin User', terminalId: 'CONTROL-ROOM', password_hash: DEFAULT_SEED_PASSWORD_HASH },
+    // Demo operator roster for the Supervisor Operator Assignment screen in mock/dev mode only -
+    // a real deployment's operators are created by an Admin via User Profiles, not seeded here.
+    { loginId: 'OP-101', role: 'Operator', displayName: 'Harsh', terminalId: 'DASHBOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
+    { loginId: 'OP-102', role: 'Operator', displayName: 'Suresh', terminalId: 'DASHBOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
+    { loginId: 'OP-103', role: 'Operator', displayName: 'Rahul', terminalId: 'DASHBOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH },
+    { loginId: 'OP-104', role: 'Operator', displayName: 'Amit', terminalId: 'DASHBOARD', password_hash: DEFAULT_SEED_PASSWORD_HASH }
   ];
 
   // 2. Generate completed downtime logs (Stopped status) to populate charts
@@ -368,6 +377,31 @@ try {
       // Ignore if column already exists
     }
 
+    // Connectivity: iot_enabled marks a machine as physically wired to an ESP32/Raspberry Pi.
+    // A machine with iot_enabled = FALSE never receives real pulses/status - it must always
+    // read "Not Connected", never a fabricated Running/Stopped/OEE state. heartbeat_timeout_seconds
+    // is the per-machine override for how long a *connected* machine can go without a pulse
+    // before the watchdog also declares it Not Connected.
+    try {
+      await pool.query('ALTER TABLE machines ADD COLUMN iot_enabled BOOLEAN NOT NULL DEFAULT FALSE');
+      console.log('   + Added "iot_enabled" column to machines table');
+      // One-time backfill: every machine that already existed before this column was added was
+      // already being treated as physically connected (there was no "Not Connected" registration
+      // concept before this feature) - only brand-new machines created from here on should
+      // default to FALSE until an Admin confirms the physical IoT wiring. Only runs the tick this
+      // ALTER actually adds the column (guarded by the same try/catch), never again afterward.
+      await pool.query('UPDATE machines SET iot_enabled = TRUE');
+      console.log('   + Backfilled "iot_enabled" = TRUE on all pre-existing machines');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
+      await pool.query('ALTER TABLE machines ADD COLUMN heartbeat_timeout_seconds INT NOT NULL DEFAULT 120');
+      console.log('   + Added "heartbeat_timeout_seconds" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+
     // production_records doubles as both the counter-close-out history (existing purpose)
     // and the part-change audit trail (previous/next part, who changed it, why) - one table
     // instead of two that could drift out of sync with each other.
@@ -383,6 +417,23 @@ try {
       try {
         await pool.query(`ALTER TABLE production_records ADD COLUMN ${column} ${definition}`);
         console.log(`   + Added "${column}" column to production_records table`);
+      } catch (err) {
+        // Ignore if column already exists
+      }
+    }
+
+    // No Part Master catalog and no Admin-configured default allowance - see the matching
+    // comment in db-setup.js. The PPC Engineer types Part Number, Part Name, Part Operation,
+    // Ideal Cycle Time, and the Loading/Unloading Allowance directly on every schedule entry.
+    const partScheduleManualEntryColumns = [
+      ['part_number', 'VARCHAR(50) NULL'],
+      ['part_operation', 'VARCHAR(150) NULL'],
+      ['load_unload_allowance_seconds', 'INT NULL']
+    ];
+    for (const [column, definition] of partScheduleManualEntryColumns) {
+      try {
+        await pool.query(`ALTER TABLE part_schedules ADD COLUMN ${column} ${definition}`);
+        console.log(`   + Added "${column}" column to part_schedules table`);
       } catch (err) {
         // Ignore if column already exists
       }
@@ -461,6 +512,14 @@ async function mockQuery(sql, params = []) {
     if (normalizedSql.includes('where id = ?')) {
       const mId = params[0];
       filtered = filtered.filter(m => m.id === mId);
+    }
+    // Watchdog's per-tick connectivity enforcement query - machines with no ESP32/Pi wired up
+    // (iot_enabled false) that aren't already showing Not Connected.
+    if (normalizedSql.includes('iot_enabled = false')) {
+      filtered = filtered.filter(m => !m.iot_enabled);
+      if (normalizedSql.includes("status != 'not connected'")) {
+        filtered = filtered.filter(m => m.status !== 'Not Connected');
+      }
     }
     return [JSON.parse(JSON.stringify(filtered)), []];
   }
@@ -622,13 +681,25 @@ async function mockQuery(sql, params = []) {
   if (sqlLower.startsWith('update machines')) {
     let affectedRows = 0;
     if (sqlLower.includes('set name')) {
-      const [name, department, target, idealCycleTime, machineId] = params;
+      const [name, department, target, idealCycleTime, iotEnabled, machineId] = params;
       const machine = mockDb.machines.find(m => m.id === machineId);
       if (machine) {
         machine.name = name;
         machine.department = department;
         machine.target = parseInt(target);
         machine.ideal_cycle_time = parseInt(idealCycleTime);
+        machine.iot_enabled = Boolean(iotEnabled);
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set target') && sqlLower.includes('and active_schedule_id')) {
+      // partSchedules.js PUT route pushing an edited target/cycle onto the currently-active
+      // machine - WHERE id = ? AND active_schedule_id = ? (no active_part_name/operator here,
+      // those columns aren't touched by this specific query).
+      const [target, ideal, machineId, scheduleId] = params;
+      const machine = mockDb.machines.find(m => m.id === machineId && m.active_schedule_id === scheduleId);
+      if (machine) {
+        machine.target = parseInt(target);
+        machine.ideal_cycle_time = parseInt(ideal);
         affectedRows = 1;
       }
     } else if (sqlLower.includes('set target') && sqlLower.includes('active_schedule_id')) {
@@ -665,6 +736,14 @@ async function mockQuery(sql, params = []) {
         machine.active_schedule_id = null;
         machine.active_part_name = null;
         machine.assigned_operator = null;
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set assigned_operator = ?')) {
+      // assign-operator pushing the operator live onto the machine's currently-active entry.
+      const [operator, machineId] = params;
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.assigned_operator = operator;
         affectedRows = 1;
       }
     } else if (sqlLower.includes('set active_schedule_id = null')) {
@@ -759,6 +838,9 @@ async function mockQuery(sql, params = []) {
     if (normalizedSql.includes('where loginid = ?')) {
       const uId = params[0];
       filtered = filtered.filter(u => u.loginId === uId);
+    } else if (normalizedSql.includes('where role = ?')) {
+      const role = params[0];
+      filtered = filtered.filter(u => u.role === role);
     }
     return [JSON.parse(JSON.stringify(filtered)), []];
   }
@@ -835,7 +917,7 @@ async function mockQuery(sql, params = []) {
       id: params[0],
       name: params[1],
       department: params[2],
-      status: 'No Signal',
+      status: 'Not Connected',
       target: parseInt(params[3]) || 0,
       production_count: 0,
       good_count: 0,
@@ -843,7 +925,9 @@ async function mockQuery(sql, params = []) {
       ideal_cycle_time: parseInt(params[4]) || 15,
       last_pulse: null,
       active_part_name: params[5] || 'Unassigned',
-      assigned_operator: params[6] || 'Unassigned'
+      assigned_operator: params[6] || 'Unassigned',
+      iot_enabled: Boolean(params[7]),
+      heartbeat_timeout_seconds: 120
     };
     mockDb.machines = mockDb.machines.filter(m => m.id !== machine.id);
     mockDb.machines.push(machine);
@@ -968,6 +1052,19 @@ async function mockQuery(sql, params = []) {
     if (normalizedSql.includes('where id = ?')) {
       const id = params[0];
       filtered = filtered.filter(p => p.id === id);
+    } else if (normalizedSql.includes('plan_date = ?') && normalizedSql.includes('shift = ?') && normalizedSql.includes('operator = ?') && normalizedSql.includes('machine_id !=')) {
+      // assign-operator's double-booking check: WHERE plan_date = ? AND shift = ? AND
+      // operator = ? AND machine_id != ? - is this operator already on a DIFFERENT machine?
+      const [planDate, shift, operatorId, excludeMachineId] = params;
+      filtered = filtered.filter(p => p.plan_date === planDate && p.shift === shift && p.operator === operatorId && p.machine_id !== excludeMachineId);
+    } else if (normalizedSql.includes('plan_date = ?') && normalizedSql.includes('shift = ?') && !normalizedSql.includes('machine_id = ?')) {
+      // operator-availability's cross-machine lookup: WHERE plan_date = ? AND shift = ? [AND
+      // operator IS NOT NULL] - no machine_id filter, since this scans every machine at once.
+      const [planDate, shift] = params;
+      filtered = filtered.filter(p => p.plan_date === planDate && p.shift === shift);
+      if (normalizedSql.includes('operator is not null')) {
+        filtered = filtered.filter(p => p.operator !== null && p.operator !== undefined);
+      }
     } else if (normalizedSql.includes('machine_id = ?') && normalizedSql.includes('shift = ?') && normalizedSql.includes('sequence > ?')) {
       const [mId, planDate, shift, seq] = params;
       filtered = filtered.filter(p => p.machine_id === mId && p.plan_date === planDate && p.shift === shift && p.sequence > seq);
@@ -1000,7 +1097,8 @@ async function mockQuery(sql, params = []) {
       machine_id: null, plan_date: null, shift: null, sequence: 1, part_name: null,
       target: 0, ideal_cycle_time: 15, operator: null, planned_start: '00:00:00', planned_end: '00:00:00',
       status: 'Pending', activated_at: null, completed_at: null, created_by: null, updated_by: null,
-      created_at: new Date(), updated_at: new Date()
+      created_at: new Date(), updated_at: new Date(),
+      part_number: null, part_operation: null, load_unload_allowance_seconds: null
     };
 
     // Columns can mix '?' placeholders with SQL literals (e.g. the fixed 'Pending' status in
@@ -1029,6 +1127,21 @@ async function mockQuery(sql, params = []) {
 
   // 23. UPDATE part_schedules
   if (sqlLower.startsWith('update part_schedules')) {
+    // assign-operator's bulk write: SET operator = ?, updated_by = ? WHERE machine_id = ? AND
+    // plan_date = ? AND shift = ? - every entry for that shift gets the same operator at once.
+    if (sqlLower.includes('set operator = ?') && sqlLower.includes('machine_id = ?')) {
+      const [operator, updatedBy, machineId, planDate, shift] = params;
+      let affectedRows = 0;
+      mockDb.part_schedules.forEach((entry) => {
+        if (entry.machine_id === machineId && entry.plan_date === planDate && entry.shift === shift) {
+          entry.operator = operator;
+          entry.updated_by = updatedBy || null;
+          entry.updated_at = new Date();
+          affectedRows++;
+        }
+      });
+      return [{ affectedRows }, []];
+    }
     // Bulk sequence renumber: UPDATE part_schedules SET sequence = ? WHERE id = ?
     if (sqlLower.includes('set sequence = ?') && !sqlLower.includes('status')) {
       const [sequence, id] = params;
@@ -1060,7 +1173,27 @@ async function mockQuery(sql, params = []) {
       }
       return [{ affectedRows: entry ? 1 : 0 }, []];
     }
-    // Generic field edit: SET target=?, ideal_cycle_time=?, operator=?, planned_start=?, planned_end=?, updated_by=? WHERE id=?
+    // Manual-entry field edit: SET target=?, ideal_cycle_time=?, part_number=?, part_name=?,
+    // part_operation=?, load_unload_allowance_seconds=?, planned_start=?, planned_end=?,
+    // updated_by=? WHERE id=?
+    if (sqlLower.includes('load_unload_allowance_seconds')) {
+      const [target, idealCycleTime, partNumber, partName, partOperation, allowance, plannedStart, plannedEnd, updatedBy, id] = params;
+      const entry = mockDb.part_schedules.find(p => p.id === id);
+      if (entry) {
+        entry.target = parseInt(target);
+        entry.ideal_cycle_time = parseInt(idealCycleTime);
+        entry.part_number = partNumber;
+        entry.part_name = partName;
+        entry.part_operation = partOperation || null;
+        entry.load_unload_allowance_seconds = parseInt(allowance);
+        entry.planned_start = plannedStart;
+        entry.planned_end = plannedEnd;
+        entry.updated_by = updatedBy || null;
+        entry.updated_at = new Date();
+      }
+      return [{ affectedRows: entry ? 1 : 0 }, []];
+    }
+    // Legacy generic field edit (pre-manual-entry rows): SET target=?, ideal_cycle_time=?, operator=?, planned_start=?, planned_end=?, updated_by=? WHERE id=?
     const [target, idealCycleTime, operator, plannedStart, plannedEnd, updatedBy, id] = params;
     const entry = mockDb.part_schedules.find(p => p.id === id);
     if (entry) {
