@@ -11,7 +11,7 @@ import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
 import { getShiftForTimestamp, toDateOnlyString, SHIFT_NAMES } from '../config/shifts.js';
 import { logger } from '../utils/logger.js';
 import { withMachineLock } from '../utils/machineLock.js';
-import { buildOeeReportRows, buildDowntimeReport } from '../services/reportingService.js';
+import { buildOeeReportRows, buildDowntimeReport, buildHourlyBreakdown } from '../services/reportingService.js';
 
 const router = express.Router();
 
@@ -387,6 +387,38 @@ router.get('/reports/oee-detail', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error('API Error: GET /reports/oee-detail:', err.message);
     res.status(500).json({ error: 'Failed to build OEE detail' });
+  }
+});
+
+/**
+ * GET /api/reports/hourly-breakdown?machineId&date&shift - the Analytics module's "Hourly
+ * Production & OEE Trend" chart data source. See buildHourlyBreakdown for the full formula.
+ */
+router.get('/reports/hourly-breakdown', requireAuth, async (req, res) => {
+  const { machineId, date, shift } = req.query;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!machineId) {
+    return res.status(400).json({ error: 'machineId is required' });
+  }
+  if (!date || !DATE_RE.test(date)) {
+    return res.status(400).json({ error: 'A valid date query param (YYYY-MM-DD) is required' });
+  }
+  if (!shift || !SHIFT_NAMES.includes(shift)) {
+    return res.status(400).json({ error: `shift must be one of: ${SHIFT_NAMES.join(', ')}` });
+  }
+
+  try {
+    const [machines] = await db.query('SELECT id, name FROM machines WHERE id = ?', [machineId]);
+    if (machines.length === 0) {
+      return res.status(404).json({ error: `Machine ${machineId} not found` });
+    }
+
+    const breakdown = await buildHourlyBreakdown(machineId, date, shift);
+    res.json({ ...breakdown, machineName: machines[0].name });
+  } catch (err) {
+    logger.error('API Error: GET /reports/hourly-breakdown:', err.message);
+    res.status(500).json({ error: 'Failed to build hourly breakdown' });
   }
 });
 

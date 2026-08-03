@@ -70,6 +70,16 @@ export function toDateOnlyString(date = new Date()) {
 }
 
 /**
+ * Formats a Date as 'HH:MM' AS OBSERVED IN THE PLANT'S TIMEZONE - used for tooltip/label display
+ * (e.g. the hourly breakdown's per-bucket time range) where the server process's own timezone
+ * must never leak into what's shown.
+ */
+export function formatPlantTime(date) {
+  const { hour, minute } = plantWallClock(new Date(date));
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+/**
  * Returns the real Date instant the currently active shift began, in plant-local time.
  * This is the basis for "Shift Elapsed Time" - unlike since-midnight accounting, it resets
  * at every shift change so a machine that hasn't started this shift shows the full shift

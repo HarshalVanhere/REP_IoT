@@ -5,8 +5,22 @@ import { isConnected } from '../lib/connectivity';
 
 export default function MachineCard({ machine, history = [], canResetCount = false, onResetCount }) {
   const { id, name, status, target, production_count, ideal_cycle_time, last_pulse, metrics, active_part_name, assigned_operator } = machine;
-  const { availability = 100, performance = 0, quality = 100, oee = 0, downtimeSeconds = 0 } = metrics || {};
+  const { availability = 100, performance = 0, quality = 100, oee = 0, downtimeSeconds = 0, shiftElapsedSeconds = 0 } = metrics || {};
   const connected = isConnected(machine);
+
+  // Remaining Target / Target Variance / Estimated Shift Completion - derived client-side from
+  // fields calculateOEE() already returns (production_count, target, shiftElapsedSeconds), no
+  // new backend endpoint needed.
+  const remainingTarget = Math.max(0, target - production_count);
+  const targetVariance = production_count - target;
+  const productionRate = shiftElapsedSeconds > 0 ? production_count / shiftElapsedSeconds : 0; // parts/sec
+  let estimatedCompletionLabel = 'N/A';
+  if (remainingTarget <= 0 && target > 0) {
+    estimatedCompletionLabel = 'Target Met';
+  } else if (productionRate > 0) {
+    const etaMs = (remainingTarget / productionRate) * 1000;
+    estimatedCompletionLabel = new Date(Date.now() + etaMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
 
   const [cycleTimer, setCycleTimer] = useState(0);
 
@@ -240,6 +254,24 @@ export default function MachineCard({ machine, history = [], canResetCount = fal
           <span className={`${achievementRate >= 100 ? 'text-emerald-600' : 'text-sky-600'} font-black font-mono`}>
             {achievementRate.toFixed(1)}%
           </span>
+        </div>
+
+        {/* Remaining Target / Target Variance / Estimated Shift Completion */}
+        <div className="grid grid-cols-3 gap-2 pt-2 mt-1 border-t border-slate-200/60">
+          <div className="text-center">
+            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">Remaining</span>
+            <span className="text-xs font-black text-slate-700 font-mono mt-0.5 block">{remainingTarget}</span>
+          </div>
+          <div className="text-center">
+            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">Variance</span>
+            <span className={`text-xs font-black font-mono mt-0.5 block ${targetVariance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+              {targetVariance >= 0 ? '+' : ''}{targetVariance}
+            </span>
+          </div>
+          <div className="text-center">
+            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">Est. Completion</span>
+            <span className="text-xs font-black text-slate-700 font-mono mt-0.5 block">{estimatedCompletionLabel}</span>
+          </div>
         </div>
       </div>
 

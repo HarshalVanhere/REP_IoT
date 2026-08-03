@@ -1321,7 +1321,7 @@ function AppShell() {
             <div className="space-y-8 w-full animate-in fade-in duration-200">
               {filteredMachines.length > 0 ? (
                 <Suspense fallback={<ViewLoadingFallback />}>
-                  <AnalyticsCharts machines={filteredMachines} reasonCodes={reasonCodes} />
+                  <AnalyticsCharts machines={filteredMachines} reasonCodes={reasonCodes} authToken={authToken} onAuthError={handleAuthError} />
                 </Suspense>
               ) : (
                 <div className="py-24 text-center text-slate-400 font-bold uppercase tracking-widest bg-[var(--white-color)] border border-[var(--grey-200)] rounded-2xl">

@@ -1,6 +1,6 @@
 import db from '../config/db.js';
-import { SHIFT_NAMES, getShiftWindow } from '../config/shifts.js';
-import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getIntervalOverlapSeconds } from './oeeCalculator.js';
+import { SHIFT_NAMES, getShiftWindow, buildPlantDateTime, formatPlantTime } from '../config/shifts.js';
+import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getIntervalOverlapSeconds, calculateAutoTarget } from './oeeCalculator.js';
 
 // Downtime reasons treated as "Planned" for the Downtime Analysis module's Planned/Unplanned
 // split - everything else in PREDEFINED_REASONS (config/reasonCodes.js) is Unplanned.
@@ -623,4 +623,128 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
   };
 
   return { machineId, machineName, startDate, endDate, groupBy, shift: shift || null, operator: operator || null, partName: partName || null, kpis, groups, events };
+}
+
+/**
+ * Slices one (machine, date, shift) into 1-hour buckets (relative to the shift's own start, not
+ * clock-aligned - Shift B starts at 15:30, so its buckets are [15:30-16:30), [16:30-17:30), ...)
+ * for the Analytics module's "Hourly Production & OEE Trend" chart:
+ *
+ *   - target, actual: CUMULATIVE through the end of that hour (matches the spec's "Target Count
+ *     (Cumulative)" / "Actual Count (Cumulative)" line-chart series).
+ *   - loss: cumulative target minus cumulative actual, floored at 0.
+ *   - downtimeSeconds, availability, performance, quality, oee: PER-HOUR (not cumulative) - a
+ *     cumulative OEE wouldn't behave meaningfully hour to hour, so these are that hour's own
+ *     snapshot, same as every other OEE calculation in this codebase.
+ *
+ * The cumulative target's rate is derived per scheduled part_schedules entry from
+ * calculateAutoTarget's own availableSeconds/target (the same numbers already shown elsewhere for
+ * that entry) - target_rate = entry.target / entry.availableSeconds (parts per available second),
+ * apportioned by however much of THIS entry's non-break time falls inside each hour bucket. An
+ * hour spanning a part changeover correctly sums contributions from both entries.
+ */
+export async function buildHourlyBreakdown(machineId, dateStr, shiftName) {
+  const window = getShiftWindow(dateStr, shiftName);
+  const now = new Date();
+  const effectiveEnd = window.end.getTime() > now.getTime() ? now : window.end;
+
+  const [machineRows] = await db.query('SELECT ideal_cycle_time, iot_enabled FROM machines WHERE id = ?', [machineId]);
+  if (machineRows.length > 0 && !machineRows[0].iot_enabled) {
+    return { machineId, date: dateStr, shift: shiftName, connected: false, hours: [] };
+  }
+  const machineDefaultIdealCycleTime = machineRows[0]?.ideal_cycle_time || 15;
+
+  if (effectiveEnd <= window.start) {
+    return { machineId, date: dateStr, shift: shiftName, connected: true, hours: [] };
+  }
+
+  const [entries] = await db.query(
+    'SELECT * FROM part_schedules WHERE machine_id = ? AND plan_date = ? AND shift = ? ORDER BY sequence ASC',
+    [machineId, dateStr, shiftName]
+  );
+
+  const entryInfos = entries.map((e) => {
+    const entryStart = buildPlantDateTime(dateStr, e.planned_start);
+    let entryEnd = buildPlantDateTime(dateStr, e.planned_end);
+    if (entryEnd.getTime() <= entryStart.getTime()) entryEnd = new Date(entryEnd.getTime() + 24 * 3600000);
+    const { availableSeconds } = calculateAutoTarget({
+      planDate: dateStr,
+      plannedStart: e.planned_start,
+      plannedEnd: e.planned_end,
+      idealCycleTime: e.ideal_cycle_time,
+      loadUnloadAllowanceSeconds: e.load_unload_allowance_seconds ?? 15
+    });
+    return {
+      entryStart, entryEnd, idealCycleTime: e.ideal_cycle_time,
+      rate: availableSeconds > 0 ? e.target / availableSeconds : 0
+    };
+  });
+
+  const midnight = getShiftWindow(dateStr, 'Shift C').start;
+  const breaks = getPlannedBreaks(midnight);
+
+  const pulses = await fetchPulsesInRange(machineId, window.start, effectiveEnd);
+  const statusLogs = await fetchStatusLogsOverlapping(machineId, window.start, effectiveEnd);
+
+  const hours = [];
+  let cursor = new Date(window.start);
+  let cumulativeTarget = 0;
+  let cumulativeActual = 0;
+  let hourIndex = 0;
+
+  while (cursor.getTime() < effectiveEnd.getTime()) {
+    const hourEnd = new Date(Math.min(cursor.getTime() + 3600000, effectiveEnd.getTime()));
+    hourIndex += 1;
+
+    let targetIncrement = 0;
+    let idealCycleTimeForHour = machineDefaultIdealCycleTime;
+    entryInfos.forEach((info) => {
+      const overlapStart = new Date(Math.max(cursor.getTime(), info.entryStart.getTime()));
+      const overlapEnd = new Date(Math.min(hourEnd.getTime(), info.entryEnd.getTime()));
+      if (overlapEnd <= overlapStart) return;
+      const breakSecondsInOverlap = breaks.reduce((s, b) => s + getIntervalOverlapSeconds(overlapStart, overlapEnd, b.start, b.end), 0);
+      const availableInOverlap = Math.max(0, (overlapEnd.getTime() - overlapStart.getTime()) / 1000 - breakSecondsInOverlap);
+      targetIncrement += availableInOverlap * info.rate;
+      idealCycleTimeForHour = info.idealCycleTime;
+    });
+    cumulativeTarget += targetIncrement;
+
+    const hourPulses = pulses.filter((p) => {
+      const t = new Date(p.timestamp).getTime();
+      return t >= cursor.getTime() && t < hourEnd.getTime();
+    });
+    cumulativeActual += hourPulses.length;
+
+    const { runningSeconds } = aggregateStatusLogs(statusLogs, cursor, hourEnd, breaks);
+    const totalWindowSeconds = (hourEnd.getTime() - cursor.getTime()) / 1000;
+    const hourBreakSeconds = breaks.reduce((s, b) => s + getIntervalOverlapSeconds(cursor, hourEnd, b.start, b.end), 0);
+    const plannedSeconds = Math.max(1, totalWindowSeconds - hourBreakSeconds);
+    const operatingSeconds = Math.min(runningSeconds, plannedSeconds);
+    const downtimeSeconds = Math.max(0, plannedSeconds - operatingSeconds);
+    const goodCount = hourPulses.filter((p) => p.is_good === 1 || p.is_good === true).length;
+
+    const { availability, performance, quality, oee } = computeOeeFromTotals({
+      plannedSeconds, operatingSeconds, totalCount: hourPulses.length, goodCount, idealCycleTime: idealCycleTimeForHour
+    });
+
+    const roundedTarget = Math.round(cumulativeTarget);
+    hours.push({
+      hour: hourIndex,
+      label: `Hour ${hourIndex}`,
+      timeRange: `${formatPlantTime(cursor)}–${formatPlantTime(hourEnd)}`,
+      target: roundedTarget,
+      actual: cumulativeActual,
+      loss: Math.max(0, roundedTarget - cumulativeActual),
+      achievementPercent: roundedTarget > 0 ? round1((cumulativeActual / roundedTarget) * 100) : null,
+      downtimeSeconds: Math.round(downtimeSeconds),
+      availability: round1(availability),
+      performance: round1(performance),
+      quality: round1(quality),
+      oee: round1(oee)
+    });
+
+    cursor = hourEnd;
+  }
+
+  return { machineId, date: dateStr, shift: shiftName, connected: true, hours };
 }
