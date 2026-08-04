@@ -171,6 +171,14 @@ async function pullMachineConfig(cloudUrl) {
     if (!remote.active_schedule_id) {
       const hadSomethingToClear = local.active_schedule_id || (local.active_part_name && local.active_part_name !== 'Unassigned');
       if (hadSomethingToClear || local.status === 'Running') {
+        // The cloud losing its active schedule (e.g. the brief gap right at a shift boundary,
+        // before the next shift's entry is activated) must close out this gateway's live tally
+        // the same way a real part/shift change does - otherwise production_count is left
+        // un-zeroed and keeps accumulating once a new schedule (and operator) shows up on the
+        // very next pull, carrying the previous shift's count into the new one.
+        if (hadSomethingToClear) {
+          await resetProductionCounters(machineId, 'shift_change', null, { changeTrigger: 'cloud_sync' });
+        }
         await db.query(
           "UPDATE machines SET active_part_name = 'Unassigned', assigned_operator = 'Unassigned', active_schedule_id = NULL WHERE id = ?",
           [machineId]
@@ -201,12 +209,16 @@ async function pullMachineConfig(cloudUrl) {
 
     if (!differs) return;
 
-    // A part change pulled down from the cloud closes out the previous part's tally as its
-    // own permanent record before the new part starts counting from 0 on this gateway. The
+    // A part OR schedule change pulled down from the cloud closes out the previous tally as its
+    // own permanent record before the new one starts counting from 0 on this gateway. Checking
+    // active_schedule_id too (not just the part name) matters at a shift boundary where the same
+    // part continues into the new shift under a new schedule entry - the part name alone
+    // wouldn't change, but the count still must not carry over from the previous shift. The
     // cloud's part_schedules id rides along as-is - this gateway has no schedule table of its
     // own, it only ever mirrors whichever entry the cloud has already resolved as active.
-    if (remotePart !== local.active_part_name) {
-      await resetProductionCounters(machineId, 'part_change', null, {
+    const scheduleChanged = remote.active_schedule_id !== local.active_schedule_id;
+    if (remotePart !== local.active_part_name || scheduleChanged) {
+      await resetProductionCounters(machineId, scheduleChanged ? 'shift_change' : 'part_change', null, {
         scheduleId: local.active_schedule_id || null,
         nextPartName: remotePart,
         changeTrigger: 'cloud_sync'
