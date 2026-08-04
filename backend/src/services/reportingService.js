@@ -157,16 +157,21 @@ export async function computeWindowMetrics(machineId, dateStr, windowStart, wind
     }
   }
 
-  // When the caller already bulk-fetched pulses/statusLogs for a wider range (see
-  // buildOeeReportRows), slice them in-memory instead of re-querying the DB per shift - avoids
-  // one network round-trip per (date x shift) against a remote MySQL host.
-  const statusLogs = preStatusLogs
-    ? preStatusLogs.filter((l) => {
-        const s = new Date(l.start_time).getTime();
-        const e = l.end_time ? new Date(l.end_time).getTime() : Infinity;
-        return s < clippedEnd.getTime() && e > windowStart.getTime();
-      })
-    : await fetchStatusLogsOverlapping(machineId, windowStart, clippedEnd);
+  // When the caller already bulk-fetched statusLogs for a wider range (see buildOeeReportRows),
+  // reuse that array in-memory instead of re-querying the DB per shift - avoids one network
+  // round-trip per (date x shift) against a remote MySQL host.
+  const allStatusLogs = preStatusLogs || await fetchStatusLogsOverlapping(machineId, windowStart, clippedEnd);
+
+  // aggregateStatusLogs gets the WIDER set (not narrowed to this window's overlap): it needs
+  // visibility into rows outside the window - e.g. an earlier still-open row's chronologically-
+  // next neighbor - to correctly truncate a row that was never properly closed, instead of
+  // letting it bleed into this window. The row-scoped `statusLogs` returned below (used for the
+  // "View Details" timeline) stays narrowed to just this window's overlap, same as before.
+  const statusLogs = allStatusLogs.filter((l) => {
+    const s = new Date(l.start_time).getTime();
+    const e = l.end_time ? new Date(l.end_time).getTime() : Infinity;
+    return s < clippedEnd.getTime() && e > windowStart.getTime();
+  });
 
   let pulses = prePulses
     ? prePulses.filter((p) => {
@@ -187,7 +192,7 @@ export async function computeWindowMetrics(machineId, dateStr, windowStart, wind
   const breaks = getPlannedBreaks(midnight);
 
   const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons } =
-    aggregateStatusLogs(statusLogs, windowStart, clippedEnd, breaks);
+    aggregateStatusLogs(allStatusLogs, windowStart, clippedEnd, breaks);
 
   const totalWindowSeconds = Math.max(0, (clippedEnd.getTime() - windowStart.getTime()) / 1000);
   const plannedSeconds = Math.max(1, totalWindowSeconds - breakSeconds);

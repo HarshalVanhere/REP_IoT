@@ -61,48 +61,100 @@ export function getIntervalOverlapSeconds(start1, end1, start2, end2) {
 }
 
 /**
- * Clips a set of status_logs rows to [windowStart, windowEnd], subtracts any overlap with the
- * given planned breaks, and buckets the remaining duration into Running/Stopped/Not Connected
- * totals (plus downtime-by-reason). Shared by the live "since midnight" calculation below and
- * reportingService.js's arbitrary historical windows, so the two can never compute utilization
- * differently.
+ * Reconstructs a single non-overlapping status timeline from a set of status_logs rows, clips it
+ * to [windowStart, windowEnd], subtracts any overlap with the given planned breaks, and buckets
+ * the remaining duration into Running/Stopped/Not Connected totals (plus downtime-by-reason).
+ * Shared by the live "since midnight" calculation below and reportingService.js's arbitrary
+ * historical windows, so the two can never compute utilization differently.
+ *
+ * status_logs rows are sometimes left with a NULL end_time when a transition wasn't closed out
+ * properly (e.g. a dropped connection racing the next status change). Summed naively, such a row
+ * counts as Running/Stopped forever - including bleeding into every later shift's window, and
+ * stacking on top of whatever legitimately runs there - which is what let Operating Time inflate
+ * to match (or exceed) Planned Production Time and made Downtime read 0 even on shifts with real
+ * stoppages. Fix: sort all rows by their ORIGINAL start_time and truncate each one's effective
+ * end at the start of the next chronologically distinct row - a later transition always
+ * supersedes an earlier, still-"open" one. Rows sharing the exact same start_time (legitimate
+ * simultaneous companions, e.g. 'Stopped' + 'Not Connected' logged together for one disconnect)
+ * are left alone rather than truncating each other.
  */
 export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
+  const winStart = windowStart.getTime();
+  const winEnd = windowEnd.getTime();
+
+  const originals = logs
+    .map((log) => ({
+      start: new Date(log.start_time).getTime(),
+      end: log.end_time ? new Date(log.end_time).getTime() : Infinity,
+      status: log.status,
+      reason: log.downtime_reason
+    }))
+    .sort((a, b) => a.start - b.start);
+
+  const distinctStarts = [...new Set(originals.map((l) => l.start))];
+  const nextDistinctStart = (t) => {
+    let best = Infinity;
+    for (const s of distinctStarts) {
+      if (s > t && s < best) best = s;
+    }
+    return best;
+  };
+
+  const resolved = originals
+    .map((l) => ({
+      start: Math.max(l.start, winStart),
+      end: Math.min(l.end, nextDistinctStart(l.start), winEnd),
+      status: l.status,
+      reason: l.reason
+    }))
+    .filter((l) => l.end > l.start);
+
   let runningSeconds = 0;
   let stoppedSeconds = 0;
   let noSignalSeconds = 0;
-  let breakSeconds = 0;
 
   const downtimeReasons = {};
   PREDEFINED_REASONS.forEach(r => downtimeReasons[r] = 0);
 
-  logs.forEach(log => {
-    const logStart = new Date(Math.max(new Date(log.start_time).getTime(), windowStart.getTime()));
-    const logEnd = log.end_time ? new Date(Math.min(new Date(log.end_time).getTime(), windowEnd.getTime())) : windowEnd;
-    let durationSeconds = Math.max(0, (logEnd.getTime() - logStart.getTime()) / 1000);
-
-    // Subtract any planned break overlap so operators are not penalized for lunch/tea breaks
+  resolved.forEach((iv) => {
+    const ivStart = new Date(iv.start);
+    const ivEnd = new Date(iv.end);
     let overlapSeconds = 0;
     breaks.forEach(b => {
-      overlapSeconds += getIntervalOverlapSeconds(logStart, logEnd, b.start, b.end);
+      overlapSeconds += getIntervalOverlapSeconds(ivStart, ivEnd, b.start, b.end);
     });
-    durationSeconds -= overlapSeconds;
-    breakSeconds += overlapSeconds;
+    const durationSeconds = Math.max(0, (iv.end - iv.start) / 1000 - overlapSeconds);
 
-    if (log.status === 'Running') {
+    if (iv.status === 'Running') {
       runningSeconds += durationSeconds;
-    } else if (log.status === 'Stopped') {
+    } else if (iv.status === 'Stopped') {
       stoppedSeconds += durationSeconds;
       // Group by reason if available
-      const reason = log.downtime_reason || 'Other';
+      const reason = iv.reason || 'Other';
       if (downtimeReasons[reason] !== undefined) {
         downtimeReasons[reason] += durationSeconds;
       } else {
         downtimeReasons['Other'] += durationSeconds;
       }
-    } else if (log.status === 'Not Connected') {
+    } else if (iv.status === 'Not Connected') {
       noSignalSeconds += durationSeconds;
     }
+  });
+
+  // Break time is credited once per unique resolved (start, end) interval, not once per row that
+  // shares it - a 'Stopped' + 'Not Connected' companion pair covering the same disconnect must
+  // not subtract the same break minute from Planned Production Time twice.
+  const uniqueIntervals = new Map();
+  resolved.forEach((iv) => {
+    uniqueIntervals.set(`${iv.start}-${iv.end}`, iv);
+  });
+  let breakSeconds = 0;
+  uniqueIntervals.forEach((iv) => {
+    const ivStart = new Date(iv.start);
+    const ivEnd = new Date(iv.end);
+    breaks.forEach(b => {
+      breakSeconds += getIntervalOverlapSeconds(ivStart, ivEnd, b.start, b.end);
+    });
   });
 
   return { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons };

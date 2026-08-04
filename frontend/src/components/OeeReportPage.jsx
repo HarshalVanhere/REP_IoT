@@ -538,9 +538,6 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
             <StatTile label="Planned Production Time" value={formatDuration(kpis.plannedProductionSeconds)} />
             <StatTile label="Operating Time" value={formatDuration(kpis.operatingSeconds)} />
             <StatTile label="Downtime" value={formatDuration(kpis.totalDowntimeSeconds)} accent="text-rose-600" />
-            <StatTile label="Total Running Time" value={formatDuration(kpis.runningSeconds)} />
-            <StatTile label="Total Stop Time" value={formatDuration(kpis.stoppedSeconds)} />
-            <StatTile label="Total Break Time" value={formatDuration(kpis.breakSeconds)} />
 
             <StatTile label="Good Parts" value={kpis.goodCount} accent="text-emerald-600" />
             <StatTile label="Reject Parts" value={kpis.rejectCount} accent="text-rose-600" />
