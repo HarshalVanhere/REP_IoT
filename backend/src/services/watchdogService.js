@@ -28,6 +28,16 @@ const noScheduleLogged = new Set();
  */
 function blockMachineWithoutSchedule(machine) {
   return withMachineLock(machine.id, async () => {
+    // The entry being orphaned here was left with status = 'Running' by whatever last
+    // activated it. If it's left that way, it can never be picked up again - the watchdog's
+    // own auto-start (below) and the PPC manual-activate path both only ever select entries
+    // with status = 'Pending'. Revert it so a later schedule fix/re-add can actually resume it.
+    if (machine.active_schedule_id !== null) {
+      await db.query(
+        "UPDATE part_schedules SET status = 'Pending' WHERE id = ? AND status = 'Running'",
+        [machine.active_schedule_id]
+      );
+    }
     await db.query(
       'UPDATE machines SET active_part_name = NULL, assigned_operator = NULL, active_schedule_id = NULL WHERE id = ?',
       [machine.id]
@@ -77,6 +87,17 @@ async function applyScheduledParts() {
       ?? (machine.segment_start ? getShiftForTimestamp(machine.segment_start) : currentShift);
     if (previousShift !== currentShift) {
       await resetProductionCounters(machine.id, 'shift_change');
+      // The outgoing entry (if any) was left with status = 'Running' by whatever activated
+      // it. Revert it to 'Pending' here - otherwise, once orphaned from active_schedule_id,
+      // it can never be auto-activated again (auto-start below, and the PPC manual-activate
+      // path, both only select 'Pending' entries), permanently stranding it as "no schedule"
+      // even after the PPC re-adds/edits it.
+      if (machine.active_schedule_id !== null) {
+        await db.query(
+          "UPDATE part_schedules SET status = 'Pending' WHERE id = ? AND status = 'Running'",
+          [machine.active_schedule_id]
+        );
+      }
       // Never carry the previous shift's part/operator into a new shift - a new shift starts
       // with nothing active until a schedule (for THIS shift) says otherwise. If one exists
       // below, it gets activated moments later in this same tick; if not, the machine stays
