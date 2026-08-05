@@ -7,7 +7,10 @@ export default function DowntimeReasonModal({ isOpen, onClose, onSubmit, machine
 
   // Reason codes are fetched from GET /api/reason-codes (single source of truth on the
   // backend) so this list can never drift from what OEE aggregation actually recognizes.
-  const predefinedReasons = reasonCodes;
+  // Entries arrive as {value, label} (Operator Terminal, ?locale=mr - label may be translated,
+  // value is always the English canonical string that actually gets submitted/stored) or as
+  // plain strings for any other caller - normalize both shapes the same way.
+  const predefinedReasons = reasonCodes.map((r) => (typeof r === 'string' ? { value: r, label: r } : r));
 
   if (!isOpen) return null;
 
@@ -46,13 +49,13 @@ export default function DowntimeReasonModal({ isOpen, onClose, onSubmit, machine
 
             <div className="grid grid-cols-2 gap-3.5 overflow-y-auto pr-1 flex-1 min-h-0 auto-rows-min">
               {predefinedReasons.map((r) => {
-                const isSelected = reason === r;
+                const isSelected = reason === r.value;
                 return (
                   <button
-                    key={r}
+                    key={r.value}
                     type="button"
                     onClick={() => {
-                      setReason(r);
+                      setReason(r.value);
                       setError('');
                     }}
                     className={`min-h-20 p-5 rounded-2xl border-2 text-lg font-black uppercase tracking-wide text-left transition-all flex items-center justify-between gap-2 cursor-pointer active:scale-95 ${
@@ -61,7 +64,7 @@ export default function DowntimeReasonModal({ isOpen, onClose, onSubmit, machine
                         : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-600'
                     }`}
                   >
-                    <span className="leading-tight">{r}</span>
+                    <span className="leading-tight">{r.label}</span>
                     {isSelected && (
                       <span className="w-4 h-4 rounded-full bg-rose-500 shrink-0" />
                     )}

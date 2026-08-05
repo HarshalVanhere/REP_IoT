@@ -113,7 +113,7 @@ export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
   let stoppedSeconds = 0;
   let noSignalSeconds = 0;
 
-  const downtimeReasons = {};
+  const downtimeReasons = { Other: 0 };
   PREDEFINED_REASONS.forEach(r => downtimeReasons[r] = 0);
 
   resolved.forEach((iv) => {

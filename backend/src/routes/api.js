@@ -7,7 +7,7 @@ import { sendSerialCommand } from '../services/serialService.js';
 import { resetProductionCounters } from '../services/productionRecordService.js';
 import { requireAuth, requireRole, requireSyncKey } from '../middleware/auth.js';
 import { recordAuditLog } from '../utils/auditLog.js';
-import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
+import { PREDEFINED_REASONS, REASON_LABELS_MR } from '../config/reasonCodes.js';
 import { getShiftForTimestamp, toDateOnlyString, SHIFT_NAMES } from '../config/shifts.js';
 import { logger } from '../utils/logger.js';
 import { withMachineLock } from '../utils/machineLock.js';
@@ -623,8 +623,15 @@ router.get('/operator-availability', requireAuth, requireRole('Supervisor', 'Adm
 
 /**
  * Downtime reason codes - single source of truth, shared by OEE aggregation and the frontend.
+ * Plain GET returns the canonical English values (what every dashboard/report/export renders,
+ * and what actually gets stored in status_logs.downtime_reason). ?locale=mr is for the Operator
+ * Terminal only: same values, paired with their Marathi display label - the terminal still
+ * submits `value` (English) so storage and Cloud-side aggregation never see Marathi text.
  */
 router.get('/reason-codes', requireAuth, (req, res) => {
+  if (req.query.locale === 'mr') {
+    return res.json(PREDEFINED_REASONS.map((value) => ({ value, label: REASON_LABELS_MR[value] || value })));
+  }
   res.json(PREDEFINED_REASONS);
 });
 

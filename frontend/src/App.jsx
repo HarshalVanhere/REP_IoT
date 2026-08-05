@@ -89,6 +89,11 @@ function AppShell() {
   const [accounts, setAccounts] = useState([]);
   const [auditLog, setAuditLog] = useState([]);
   const [reasonCodes, setReasonCodes] = useState([]);
+  // Marathi-labeled {value, label} pairs for the Operator Terminal ONLY - `value` stays the
+  // English canonical string (what's actually submitted/stored), `label` is what's shown. Every
+  // Cloud-side view (dashboards, reports, exports) keeps using the plain English `reasonCodes`
+  // above, never this list.
+  const [operatorReasonCodes, setOperatorReasonCodes] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [socketConnected, setSocketConnected] = useState(false);
   const [initialLoadComplete, setInitialLoadComplete] = useState(false);
@@ -269,7 +274,11 @@ function AppShell() {
       const machinesList = await apiFetch('/api/machines', { token: authToken });
       setMachines(machinesList);
 
-      if (reasonCodes.length === 0) {
+      if (isKioskMode) {
+        if (operatorReasonCodes.length === 0) {
+          apiFetch('/api/reason-codes?locale=mr', { token: authToken }).then(setOperatorReasonCodes).catch(() => {});
+        }
+      } else if (reasonCodes.length === 0) {
         apiFetch('/api/reason-codes', { token: authToken }).then(setReasonCodes).catch(() => {});
       }
 
@@ -774,7 +783,7 @@ function AppShell() {
           onResumeMachine={handleResumeMachine}
           operatingMode={operatingMode}
           sessionUser={sessionUser}
-          reasonCodes={reasonCodes}
+          reasonCodes={operatorReasonCodes}
         />
       </div>
     );
