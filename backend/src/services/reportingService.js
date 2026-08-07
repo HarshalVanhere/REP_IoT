@@ -61,6 +61,7 @@ async function fetchPulsesInRange(machineId, windowStart, windowEnd) {
   return pulses;
 }
 
+
 /**
  * Fetches status_logs overlapping [windowStart, windowEnd) for a machine (same mock/real
  * branching as fetchPulsesInRange, benefiting from idx_status_logs_machine_start on real MySQL).
