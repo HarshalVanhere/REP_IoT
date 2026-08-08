@@ -1,15 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package } from 'lucide-react';
+import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package, WifiOff } from 'lucide-react';
 import DowntimeReasonModal from './DowntimeReasonModal';
 import jbmLogo from '../assets/jbmlogo (1).png';
 import roseLogo from '../assets/rose logo (1).png';
+
+// How long machine data can go without refreshing (a WS push or a successful reconciliation
+// poll) before the kiosk treats what's on screen as stale rather than live. The reconciliation
+// poll normally succeeds every 1.5s in kiosk mode (see App.jsx) - this threshold gives several
+// missed polls of slack for ordinary network jitter before warning the operator.
+const STALE_DATA_THRESHOLD_MS = 10000;
 
 export default function OperatorTerminal({
   machines,
   onStopMachine,
   onResumeMachine,
   sessionUser,
-  reasonCodes = []
+  reasonCodes = [],
+  socketConnected = true,
+  lastDataUpdateAt = Date.now()
 }) {
   const selectedId = '1313'; // Station-locked for this machine's screen
   const [isReasonOpen, setIsReasonOpen] = useState(false);
@@ -70,6 +78,23 @@ export default function OperatorTerminal({
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
   }, [currentShift]);
+
+  // Ticks once a second purely to re-evaluate data staleness below - lastDataUpdateAt itself
+  // only changes when fresh data actually arrives, so without this the "is it stale yet" check
+  // would never re-run once no new data comes in (the very case it needs to detect).
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const interval = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+  const isDataStale = (nowTick - lastDataUpdateAt) > STALE_DATA_THRESHOLD_MS;
+  // Connection lost takes priority over "just stale" - it's the more actionable/severe state,
+  // and once the socket is down the data is inevitably about to go stale anyway.
+  const connectivityBanner = !socketConnected
+    ? { tone: 'offline', message: 'Connection Lost — Reconnecting…' }
+    : isDataStale
+    ? { tone: 'stale', message: 'Data May Be Out Of Date' }
+    : null;
 
   useEffect(() => {
     setShowManualLogin(false);
@@ -150,6 +175,25 @@ export default function OperatorTerminal({
       {/* Ambient decorative glow blobs */}
       <div className="absolute top-[-20%] left-[-10%] w-[55%] h-[55%] rounded-full bg-sky-600 opacity-[0.07] blur-3xl pointer-events-none" />
       <div className="absolute bottom-[-25%] right-[-10%] w-[55%] h-[55%] rounded-full bg-violet-600 opacity-[0.07] blur-3xl pointer-events-none" />
+
+      {/* Connectivity/staleness banner - shown whenever the socket is down or the machine data
+          on screen hasn't refreshed recently, so an operator can never unknowingly act on stale
+          data. Renders nothing (zero layout impact) once connected and fresh again - no manual
+          dismiss needed, it clears itself the moment real data resumes flowing. */}
+      {connectivityBanner && (
+        <div
+          className={`w-full shrink-0 mb-2 rounded-2xl px-4 py-2 flex items-center justify-center gap-2.5 relative z-20 animate-in fade-in border-2 ${
+            connectivityBanner.tone === 'offline'
+              ? 'bg-gradient-to-r from-rose-950/80 to-slate-900 border-rose-800/60'
+              : 'bg-gradient-to-r from-amber-950/80 to-slate-900 border-amber-800/60'
+          }`}
+        >
+          <WifiOff className={`w-5 h-5 shrink-0 animate-pulse ${connectivityBanner.tone === 'offline' ? 'text-rose-400' : 'text-amber-400'}`} />
+          <span className={`text-sm font-black uppercase tracking-wide ${connectivityBanner.tone === 'offline' ? 'text-rose-300' : 'text-amber-300'}`}>
+            {connectivityBanner.message}
+          </span>
+        </div>
+      )}
 
       {!loggedInOperator && (
         <div className="w-full flex items-center justify-between px-4 py-2 border-b-2 border-slate-800 bg-slate-950 shrink-0 mb-2 relative z-10">

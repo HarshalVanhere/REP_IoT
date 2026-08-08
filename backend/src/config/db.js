@@ -8,6 +8,16 @@ dotenv.config();
 let pool = null;
 let isMock = false;
 
+// CRITICAL FIX: a connection failure at boot used to leave isMock permanently true for the
+// rest of the process's life - nothing ever attempted to reconnect, and even a manual fix
+// wouldn't have been visible to callers (see the `db.isMock` getter further down). These two
+// flags back a background self-healing retry loop: `reconnecting` prevents two retry attempts
+// from overlapping if a slow connection attempt is still in flight when the next tick fires,
+// and `reconnectTimer` lets that loop be cancelled once a real connection is restored.
+let reconnecting = false;
+let reconnectTimer = null;
+const RECONNECT_INTERVAL_MS = 30000;
+
 // Default seed password for demo/first-boot accounts. Must be changed via
 // POST /api/auth/change-password before real deployment.
 const DEFAULT_SEED_PASSWORD_HASH = bcrypt.hashSync('1234', 10);
@@ -177,38 +187,35 @@ function seedMockData() {
   console.log(`✅ Seeded mock database: ${mockDb.pulses.length} pulses, ${mockDb.status_logs.length} downtime cycles.`);
 }
 
-try {
-  const connectionConfig = {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '3306'),
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME || 'cnc_dashboard',
-    // Return DATE columns (e.g. shift_plans.plan_date) as plain 'YYYY-MM-DD' strings instead
-    // of Date objects - avoids UTC-midnight timezone drift when comparing dates as strings.
-    // Scoped to DATE only so existing TIMESTAMP columns (last_pulse, start_time, etc.) are unaffected.
-    dateStrings: ['DATE'],
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-  };
+const connectionConfig = {
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '3306'),
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME || 'cnc_dashboard',
+  // Return DATE columns (e.g. shift_plans.plan_date) as plain 'YYYY-MM-DD' strings instead
+  // of Date objects - avoids UTC-midnight timezone drift when comparing dates as strings.
+  // Scoped to DATE only so existing TIMESTAMP columns (last_pulse, start_time, etc.) are unaffected.
+  dateStrings: ['DATE'],
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
 
-  const isProduction = process.env.NODE_ENV === 'production';
+const isProduction = process.env.NODE_ENV === 'production';
 
-  if (process.env.DB_PASSWORD === 'your_mysql_password' || !process.env.DB_PASSWORD) {
-    if (isProduction) {
-      throw new Error('Database password is unset or placeholder. Database connection is required in production mode.');
-    }
-    console.warn('⚠️  Database password is unset or placeholder. Falling back to IN-MEMORY MOCK database mode.');
-    isMock = true;
-    seedMockData();
-  } else {
-    pool = mysql.createPool(connectionConfig);
-    const conn = await pool.getConnection();
-    console.log('✅ Connected to MySQL successfully.');
-    conn.release();
-    
-    // Create users table and seed initial users in MySQL if empty
+// Hoisted out of the boot-time try/catch below so the background reconnect loop (see
+// scheduleReconnectAttempts()) can call the exact same connect-and-migrate logic again later,
+// instead of duplicating it. Every statement in here is already idempotent (CREATE TABLE IF NOT
+// EXISTS, ALTER TABLE wrapped in try/catch-ignore, migrations guarded by a COUNT(*) === 0 check)
+// so re-running it on a later successful reconnect is always safe, not just at first boot.
+async function connectAndSetupRealDatabase() {
+  pool = mysql.createPool(connectionConfig);
+  const conn = await pool.getConnection();
+  console.log('✅ Connected to MySQL successfully.');
+  conn.release();
+
+  // Create users table and seed initial users in MySQL if empty
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         loginId VARCHAR(50) PRIMARY KEY,
@@ -489,9 +496,55 @@ try {
     } catch (err) {
       console.warn('⚠️  shift_plans -> part_schedules migration skipped:', err.message);
     }
+}
+
+// Background self-healing loop for the case where `connectAndSetupRealDatabase()` fails at
+// boot (transient network blip, DB not accepting connections yet, etc.) and the process has
+// fallen back to mock mode below. Without this, `isMock` stayed true for the rest of the
+// process's life - a real production incident this fixes, not a hypothetical one.
+async function attemptReconnect() {
+  if (reconnecting) return; // a previous attempt is still in flight - never overlap retries
+  reconnecting = true;
+  try {
+    await connectAndSetupRealDatabase();
+    isMock = false;
+    console.log('✅ Recovered: MySQL connection re-established, resuming real database mode.');
+    if (reconnectTimer) {
+      clearInterval(reconnectTimer);
+      reconnectTimer = null;
+    }
+  } catch (err) {
+    // Still down - leave isMock as-is and let the next scheduled tick try again. Reset `pool`
+    // in case createPool() partially succeeded before the failure, so a stale/broken pool is
+    // never left reachable through db.getPool()/db.query() while isMock is still true.
+    pool = null;
+    console.warn(`⚠️  Reconnect attempt to MySQL failed, still in mock mode: ${err.message}`);
+  } finally {
+    reconnecting = false;
+  }
+}
+
+function scheduleReconnectAttempts() {
+  if (reconnectTimer) return; // already scheduled
+  reconnectTimer = setInterval(attemptReconnect, RECONNECT_INTERVAL_MS);
+}
+
+try {
+  if (process.env.DB_PASSWORD === 'your_mysql_password' || !process.env.DB_PASSWORD) {
+    if (isProduction) {
+      throw new Error('Database password is unset or placeholder. Database connection is required in production mode.');
+    }
+    console.warn('⚠️  Database password is unset or placeholder. Falling back to IN-MEMORY MOCK database mode.');
+    isMock = true;
+    seedMockData();
+    // Deliberately NOT scheduling a reconnect loop here: an unset/placeholder password is a
+    // configuration problem, not a transient outage - it cannot self-resolve without an env
+    // change and a restart, and retrying would just re-seed mock data on a timer for no benefit.
+  } else {
+    await connectAndSetupRealDatabase();
   }
 } catch (error) {
-  if (process.env.NODE_ENV === 'production') {
+  if (isProduction) {
     console.error('❌ Production Error: Failed to connect to MySQL database:', error.message);
     process.exit(1);
   }
@@ -499,6 +552,7 @@ try {
   isMock = true;
   pool = null;
   seedMockData();
+  scheduleReconnectAttempts();
 }
 
 // Simple query simulator for in-memory mode
@@ -1220,7 +1274,13 @@ async function mockQuery(sql, params = []) {
 }
 
 const db = {
-  isMock,
+  // A getter, not a captured value: `isMock` can now flip back to false after a successful
+  // background reconnect (see attemptReconnect() above), and every caller of `db.isMock`
+  // (server.js's /api/health, oeeCalculator.js, reportingService.js) must see that live state
+  // rather than whatever it was the instant this object was constructed at module load.
+  get isMock() {
+    return isMock;
+  },
   query: async (sql, params) => {
     if (isMock) {
       return mockQuery(sql, params);

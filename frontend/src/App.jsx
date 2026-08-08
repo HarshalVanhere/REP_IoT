@@ -96,6 +96,11 @@ function AppShell() {
   const [operatorReasonCodes, setOperatorReasonCodes] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [socketConnected, setSocketConnected] = useState(false);
+  // Last time machine data actually refreshed (a WS push landing, or a reconciliation poll
+  // succeeding) - independent of socketConnected, since the poll is a separate HTTP path that
+  // can itself stall even while socketConnected still reads true. This is what the kiosk's
+  // stale-data banner (OperatorTerminal) checks, not just the WebSocket's own open/closed state.
+  const [lastDataUpdateAt, setLastDataUpdateAt] = useState(Date.now());
   const [initialLoadComplete, setInitialLoadComplete] = useState(false);
 
   // User profile CRUD form states (Admin view)
@@ -323,6 +328,11 @@ function AppShell() {
             return;
           }
 
+          // Any real push past WELCOME means the data on screen just got fresher - tracked
+          // separately from socketConnected so the stale-data check reflects actual data
+          // freshness, not merely whether the socket happens to still be open.
+          setLastDataUpdateAt(Date.now());
+
           if (data.type === 'PULSE') {
             const { machineId, pulse, metrics } = data;
 
@@ -453,8 +463,11 @@ function AppShell() {
         try {
           const machinesList = await apiFetch('/api/machines', { token: authToken });
           setMachines(machinesList);
+          setLastDataUpdateAt(Date.now());
         } catch (err) {
           console.error('Reconciliation polling failed:', err.message);
+          // Deliberately not touching lastDataUpdateAt here - a failed poll means the data on
+          // screen is aging, which is exactly what the kiosk's stale-data banner needs to catch.
         }
       })();
     }, intervalTime);
@@ -784,6 +797,8 @@ function AppShell() {
           operatingMode={operatingMode}
           sessionUser={sessionUser}
           reasonCodes={operatorReasonCodes}
+          socketConnected={socketConnected}
+          lastDataUpdateAt={lastDataUpdateAt}
         />
       </div>
     );

@@ -37,15 +37,30 @@ export function activateScheduleEntry(machineId, nextEntry, { changedBy = null, 
       changeReason
     });
 
-    if (currentEntry) {
-      await db.query("UPDATE part_schedules SET status = 'Completed', completed_at = NOW() WHERE id = ?", [currentEntry.id]);
+    // part_schedules.status and machines.active_schedule_id must never be allowed to disagree -
+    // as three separate statements, a failure between the part_schedules write and the machines
+    // write (dropped connection, deadlock, process restart) previously left a part_schedules row
+    // stuck at status='Running' while machines.active_schedule_id stayed pointing at nothing (or
+    // NULL) - silently bricking that machine's auto-schedule pickup, since nothing else ever
+    // retries a row that isn't 'Pending'. All-or-nothing makes that impossible.
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      if (currentEntry) {
+        await connection.query("UPDATE part_schedules SET status = 'Completed', completed_at = NOW() WHERE id = ?", [currentEntry.id]);
+      }
+      await connection.query("UPDATE part_schedules SET status = 'Running', activated_at = NOW() WHERE id = ?", [nextEntry.id]);
+      await connection.query(
+        'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ?, active_schedule_id = ? WHERE id = ?',
+        [nextEntry.target, nextEntry.ideal_cycle_time, nextEntry.part_name, nextEntry.operator || 'Unassigned', nextEntry.id, machineId]
+      );
+      await connection.commit();
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
     }
-    await db.query("UPDATE part_schedules SET status = 'Running', activated_at = NOW() WHERE id = ?", [nextEntry.id]);
-
-    await db.query(
-      'UPDATE machines SET target = ?, ideal_cycle_time = ?, active_part_name = ?, assigned_operator = ?, active_schedule_id = ? WHERE id = ?',
-      [nextEntry.target, nextEntry.ideal_cycle_time, nextEntry.part_name, nextEntry.operator || 'Unassigned', nextEntry.id, machineId]
-    );
 
     const [statusRows] = await db.query('SELECT status FROM machines WHERE id = ?', [machineId]);
     if (statusRows.length > 0) {

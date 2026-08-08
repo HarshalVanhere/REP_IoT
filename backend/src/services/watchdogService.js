@@ -86,30 +86,60 @@ async function applyScheduledParts() {
     const previousShift = lastSeenShift.get(machine.id)
       ?? (machine.segment_start ? getShiftForTimestamp(machine.segment_start) : currentShift);
     if (previousShift !== currentShift) {
-      await resetProductionCounters(machine.id, 'shift_change');
-      // The outgoing entry (if any) was left with status = 'Running' by whatever activated
-      // it. Revert it to 'Pending' here - otherwise, once orphaned from active_schedule_id,
-      // it can never be auto-activated again (auto-start below, and the PPC manual-activate
-      // path, both only select 'Pending' entries), permanently stranding it as "no schedule"
-      // even after the PPC re-adds/edits it.
-      if (machine.active_schedule_id !== null) {
-        await db.query(
-          "UPDATE part_schedules SET status = 'Pending' WHERE id = ? AND status = 'Running'",
-          [machine.active_schedule_id]
-        );
+      // CRITICAL FIX: this whole reset used to run outside withMachineLock, mutating
+      // `machines`/`part_schedules` straight off the stale batch `SELECT * FROM machines` taken
+      // at the top of this function. A PPC Engineer's manual activation for the NEW shift
+      // (activateScheduleEntry, which DOES take the lock) landing in the gap between that batch
+      // SELECT and this tick reaching the machine would get silently overwritten back to "no
+      // schedule" by the unconditional UPDATEs below - the lock only protected one side of the
+      // race. Wrapping this in the same lock, and re-reading fresh state inside it, makes this
+      // race impossible: whichever of the two actually runs first now serializes against the other.
+      await withMachineLock(machine.id, async () => {
+        const [freshRows] = await db.query('SELECT active_schedule_id FROM machines WHERE id = ?', [machine.id]);
+        if (freshRows.length === 0) return;
+        const activeScheduleId = freshRows[0].active_schedule_id;
+
+        if (activeScheduleId !== null) {
+          const [entryRows] = await db.query('SELECT shift FROM part_schedules WHERE id = ?', [activeScheduleId]);
+          // The currently-active entry already belongs to the shift we're transitioning INTO -
+          // a concurrent manual override already handled this boundary for us. Leave it alone
+          // instead of clobbering real work that landed between our batch SELECT and this lock.
+          if (entryRows.length > 0 && entryRows[0].shift === currentShift) {
+            return;
+          }
+        }
+
+        await resetProductionCounters(machine.id, 'shift_change');
+        // The outgoing entry (if any) was left with status = 'Running' by whatever activated
+        // it. Revert it to 'Pending' here - otherwise, once orphaned from active_schedule_id,
+        // it can never be auto-activated again (auto-start below, and the PPC manual-activate
+        // path, both only select 'Pending' entries), permanently stranding it as "no schedule"
+        // even after the PPC re-adds/edits it.
+        if (activeScheduleId !== null) {
+          await db.query(
+            "UPDATE part_schedules SET status = 'Pending' WHERE id = ? AND status = 'Running'",
+            [activeScheduleId]
+          );
+        }
+        // Never carry the previous shift's part/operator into a new shift - a new shift starts
+        // with nothing active until a schedule (for THIS shift) says otherwise. If one exists
+        // below, it gets activated moments later in this same tick; if not, the machine stays
+        // blocked exactly as blockMachineWithoutSchedule would leave it anyway.
+        await db.query('UPDATE machines SET active_schedule_id = NULL, active_part_name = NULL, assigned_operator = NULL WHERE id = ?', [machine.id]);
+      });
+
+      // Refresh the in-memory snapshot used by the rest of THIS tick's logic below - the
+      // lock-protected block above may have reset the machine, or found a concurrent override
+      // already handled it, and either way `machine` here must reflect the real current state
+      // before the auto-start logic further down decides what (if anything) to activate next.
+      const [refreshedRows] = await db.query('SELECT * FROM machines WHERE id = ?', [machine.id]);
+      if (refreshedRows.length > 0) {
+        Object.assign(machine, refreshedRows[0]);
       }
-      // Never carry the previous shift's part/operator into a new shift - a new shift starts
-      // with nothing active until a schedule (for THIS shift) says otherwise. If one exists
-      // below, it gets activated moments later in this same tick; if not, the machine stays
-      // blocked exactly as blockMachineWithoutSchedule would leave it anyway.
-      await db.query('UPDATE machines SET active_schedule_id = NULL, active_part_name = NULL, assigned_operator = NULL WHERE id = ?', [machine.id]);
-      machine.active_schedule_id = null;
-      machine.active_part_name = null;
-      machine.assigned_operator = null;
-      machine.production_count = 0;
+
       exhaustedLogged.delete(machine.id);
       noScheduleLogged.delete(machine.id);
-      logger.info(`⏰ Watchdog: Shift boundary crossed for machine ${machine.id} (${previousShift} -> ${currentShift}), production counters reset.`);
+      logger.info(`⏰ Watchdog: Shift boundary crossed for machine ${machine.id} (${previousShift} -> ${currentShift}).`);
     }
     lastSeenShift.set(machine.id, currentShift);
 
@@ -131,7 +161,18 @@ async function applyScheduledParts() {
 
     if (currentEntry) {
       const targetReached = machine.production_count >= currentEntry.target;
-      const endTimeReached = now >= buildPlantDateTime(today, currentEntry.planned_end);
+      const entryStartTime = buildPlantDateTime(today, currentEntry.planned_start);
+      let entryEndTime = buildPlantDateTime(today, currentEntry.planned_end);
+      // CRITICAL FIX: a window ending at midnight (e.g. Shift B's planned_end stored as
+      // "00:00:00") means midnight of the FOLLOWING day, not the start of `today` itself - the
+      // exact same rollover calculateAutoTarget() in oeeCalculator.js already accounts for.
+      // Without this, buildPlantDateTime(today, "00:00:00") resolves to a moment hours in the
+      // past the instant a Shift B entry activates, so endTimeReached was true on the very next
+      // 10-second tick - cutting the part short seconds after it started and zeroing its counters.
+      if (entryEndTime.getTime() <= entryStartTime.getTime()) {
+        entryEndTime = new Date(entryEndTime.getTime() + 24 * 3600000);
+      }
+      const endTimeReached = now >= entryEndTime;
 
       if (targetReached || endTimeReached) {
         nextEntry = activeEntries.find((e) => e.sequence > currentEntry.sequence) || null;
