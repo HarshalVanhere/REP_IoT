@@ -250,6 +250,14 @@ async function setup() {
     } catch (err) {
       // Ignore if column already exists
     }
+    // Last time this machine's ESP32 sent a liveness heartbeat - see the matching comment in
+    // db.js. Separate from last_pulse (production-only); this is what connectivity is judged on.
+    try {
+      await connection.query('ALTER TABLE machines ADD COLUMN last_heartbeat TIMESTAMP NULL');
+      console.log('   + Added "last_heartbeat" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
     try {
       await connection.query('ALTER TABLE pulses ADD COLUMN part_schedule_id INT NULL');
       console.log('   + Added "part_schedule_id" column to pulses table');

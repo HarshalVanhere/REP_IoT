@@ -10,6 +10,15 @@ unsigned long lastPulseDebounce = 0;
 const unsigned long PARTS_LOCKOUT_DELAY = 1500; // 1.5 seconds minimum between finished parts (lockout)
 unsigned long lastCycleStart = 0;
 
+// --- Connectivity Heartbeat ---
+// Sent independently of Cycle Complete pulses - a machine can legitimately go several minutes
+// between pulses (measuring, tool change, program hold, long cycle, load/unload) while staying
+// fully connected the whole time. The heartbeat is the ONLY signal the backend's watchdog uses
+// to judge ESP32<->Pi connectivity (see watchdogService.js) - keeping it on its own fast, fixed
+// interval, unrelated to what the machine is actually doing, is what makes that possible.
+unsigned long lastHeartbeatSent = 0;
+const unsigned long HEARTBEAT_INTERVAL = 5000; // 5 seconds
+
 // Debounce for mechanical relay noise on PIN_PULSE
 int lastPulsePinState = LOW;
 int stablePulseState = LOW;
@@ -103,6 +112,12 @@ void setup() {
 void loop() {
   // Listen for control commands from the Edge Gateway backend
   readSerialCommands();
+
+  // --- 0. Connectivity heartbeat (independent of production) ---
+  if ((millis() - lastHeartbeatSent) >= HEARTBEAT_INTERVAL) {
+    lastHeartbeatSent = millis();
+    Serial.println("{\"type\":\"heartbeat\"}");
+  }
 
   // --- 1. Read Cycle Complete Pulse with debounce ---
   int currentPulsePinVal = digitalRead(PIN_PULSE);

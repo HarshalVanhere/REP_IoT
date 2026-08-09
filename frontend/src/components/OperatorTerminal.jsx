@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package, WifiOff } from 'lucide-react';
+import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package, Wifi, WifiOff } from 'lucide-react';
 import DowntimeReasonModal from './DowntimeReasonModal';
 import jbmLogo from '../assets/jbmlogo (1).png';
 import roseLogo from '../assets/rose logo (1).png';
@@ -95,6 +95,15 @@ export default function OperatorTerminal({
     : isDataStale
     ? { tone: 'stale', message: 'Data May Be Out Of Date' }
     : null;
+
+  // Same three states as the banner above, but as a small always-visible header badge (like a
+  // phone's signal icon) rather than something that only appears when there's a problem - so an
+  // operator can glance at connectivity status at any time, not just during an active incident.
+  const connectivityTheme = connectivityBanner === null
+    ? { Icon: Wifi, label: 'ONLINE', grad: 'from-emerald-950/70', border: 'border-emerald-900/50', text: 'text-emerald-300', pulse: false }
+    : connectivityBanner.tone === 'stale'
+    ? { Icon: Wifi, label: 'STALE', grad: 'from-amber-950/70', border: 'border-amber-900/50', text: 'text-amber-300', pulse: true }
+    : { Icon: WifiOff, label: 'OFFLINE', grad: 'from-rose-950/70', border: 'border-rose-900/50', text: 'text-rose-300', pulse: true };
 
   useEffect(() => {
     setShowManualLogin(false);
@@ -291,6 +300,15 @@ export default function OperatorTerminal({
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              {/* Connectivity Badge */}
+              <div
+                title={connectivityBanner?.message || 'Live connection to server is healthy'}
+                className={`border-2 rounded-xl px-3 py-2 flex items-center gap-1.5 text-sm font-black uppercase tracking-wide shrink-0 shadow-lg bg-gradient-to-br ${connectivityTheme.grad} to-slate-900 ${connectivityTheme.border} ${connectivityTheme.text}`}
+              >
+                <connectivityTheme.Icon className={`w-5 h-5 shrink-0 ${connectivityTheme.pulse ? 'animate-pulse' : ''}`} />
+                <span className="whitespace-nowrap">{connectivityTheme.label}</span>
+              </div>
+
               {/* Operator Badge */}
               <div className="border-2 border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl px-3 py-2 flex items-center gap-1.5 text-sm font-black uppercase text-slate-100 tracking-wide shadow-lg">
                 <User className="w-5 h-5 text-sky-400 shrink-0" />

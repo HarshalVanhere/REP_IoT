@@ -72,6 +72,8 @@ export function startMQTTBroker(broadcastCallback) {
           await handlePulseMessage(machineId, payload);
         } else if (messageType === 'status') {
           await handleStatusMessage(machineId, payload.status || payload.value);
+        } else if (messageType === 'heartbeat') {
+          await handleHeartbeatMessage(machineId);
         }
       } catch (err) {
         logger.error(`Error processing MQTT topic ${topic}:`, err.message);
@@ -169,6 +171,23 @@ export async function handlePulseMessage(machineId, payload) {
       metrics: oeeMetrics
     });
   }
+}
+
+/**
+ * Handles a lightweight liveness heartbeat from a machine's ESP32 (sent every ~5s over serial,
+ * see esp32_cnc_monitor.ino - or over MQTT on the "cnc/{machineId}/heartbeat" topic for any
+ * future non-serial gateway). This is the ONLY signal watchdogService.js's edge-gateway
+ * connectivity check uses (see applyScheduledParts's sibling stale-pulse block) - deliberately
+ * decoupled from production entirely. Unlike handlePulseMessage/handleStatusMessage, this never
+ * touches status, counts, OEE, or the WebSocket broadcast - a heartbeat isn't user-facing
+ * telemetry, just a liveness timestamp, and recalculating/broadcasting on every 5s tick for every
+ * machine would be pure overhead for zero informational gain (nothing production-relevant
+ * changed).
+ */
+export async function handleHeartbeatMessage(machineId) {
+  const timestamp = new Date();
+  timestamp.setMilliseconds(0);
+  await db.query('UPDATE machines SET last_heartbeat = ? WHERE id = ?', [timestamp, machineId]);
 }
 
 /**

@@ -46,7 +46,7 @@ const mockDb = {
 // All seeded demo machines are treated as already physically wired up (iot_enabled = true) so
 // the existing mock-mode live/report demo data keeps working unchanged - a newly Admin-created
 // machine defaults iot_enabled = false (see partMaster/machines POST route) until connected.
-mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; m.last_manual_reset_at = null; m.last_cycle_reset_at = null; m.iot_enabled = true; m.heartbeat_timeout_seconds = 120; });
+mockDb.machines.forEach((m) => { m.segment_start = new Date(); m.active_schedule_id = null; m.last_manual_reset_at = null; m.last_cycle_reset_at = null; m.iot_enabled = true; m.heartbeat_timeout_seconds = 120; m.last_heartbeat = null; });
 
 let mockPulseId = 1;
 let mockLogId = 1;
@@ -405,6 +405,16 @@ async function connectAndSetupRealDatabase() {
     try {
       await pool.query('ALTER TABLE machines ADD COLUMN heartbeat_timeout_seconds INT NOT NULL DEFAULT 120');
       console.log('   + Added "heartbeat_timeout_seconds" column to machines table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    // Last time this machine's ESP32 sent a liveness heartbeat (see handleHeartbeatMessage in
+    // mqttService.js) - separate from last_pulse, which only advances on a finished production
+    // cycle. This is now the sole signal watchdogService.js's edge-gateway connectivity check
+    // uses; last_pulse remains purely a production-tracking field.
+    try {
+      await pool.query('ALTER TABLE machines ADD COLUMN last_heartbeat TIMESTAMP NULL');
+      console.log('   + Added "last_heartbeat" column to machines table');
     } catch (err) {
       // Ignore if column already exists
     }
@@ -826,6 +836,13 @@ async function mockQuery(sql, params = []) {
       const machine = mockDb.machines.find(m => m.id === machineId);
       if (machine) {
         machine.last_cycle_reset_at = resetAt;
+        affectedRows = 1;
+      }
+    } else if (sqlLower.includes('set last_heartbeat = ?')) {
+      const [heartbeatAt, machineId] = params;
+      const machine = mockDb.machines.find(m => m.id === machineId);
+      if (machine) {
+        machine.last_heartbeat = heartbeatAt;
         affectedRows = 1;
       }
     } else if (sqlLower.includes('set production_count = 0')) {

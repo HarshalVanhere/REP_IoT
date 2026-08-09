@@ -1,7 +1,7 @@
 import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import db from '../config/db.js';
-import { handlePulseMessage, handleStatusMessage } from './mqttService.js';
+import { handlePulseMessage, handleStatusMessage, handleHeartbeatMessage } from './mqttService.js';
 import { logger } from '../utils/logger.js';
 
 let portInstance = null;
@@ -111,6 +111,15 @@ function connectSerial(portPath, baudRate) {
           logger.info(`✅ Serial: Command "${command}" acknowledged by ESP32.`);
           pending.resolve(payload);
         }
+        return;
+      }
+
+      // Liveness-only signal, decoupled from production entirely - see handleHeartbeatMessage()
+      // for why this must never touch status/counts. Logged at debug (not info) since it arrives
+      // every ~5s and would otherwise flood the log with zero informational content per line.
+      if (payload.type === 'heartbeat') {
+        logger.debug(`💓 Serial: Heartbeat received from ${gatewayMachineId}`);
+        await handleHeartbeatMessage(gatewayMachineId);
         return;
       }
 

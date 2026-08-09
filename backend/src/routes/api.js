@@ -753,6 +753,23 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
       );
 
       if (existing.length === 0) {
+        // CRITICAL FIX: every other place in this codebase that opens a new status_logs row
+        // (ensureActiveStatusLog, handleResumeMessage) closes out any OTHER row already open
+        // for that machine first - exactly one open row per machine is an invariant the rest of
+        // the system depends on. This insert path was the one place that never enforced it: a
+        // batch that uploads a still-open segment (endTime === null, normal on every sync cycle
+        // until that segment actually closes) that never later gets re-matched by the exact
+        // same (machine_id, status, start_time) tuple leaves a PERMANENT orphaned open row on
+        // the cloud. These accumulate forever and make the watchdog's stale-pulse LEFT JOIN
+        // process the same machine multiple times per tick (see the comment in
+        // handleResumeMessage for why that misfires) - a real, confirmed cause of erratic
+        // "Not Connected" behavior on an actively-producing machine.
+        if (endTime === null) {
+          await connection.query(
+            'UPDATE status_logs SET end_time = ?, synced = TRUE WHERE machine_id = ? AND end_time IS NULL',
+            [startTime, log.machine_id]
+          );
+        }
         await connection.query(
           'INSERT INTO status_logs (machine_id, status, start_time, end_time, downtime_reason, operator_id, part_name, synced) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)',
           [

@@ -295,32 +295,46 @@ export function startWatchdogService(broadcast) {
           continue;
         }
 
-        // Use whichever is more recent: a stale last_pulse from before a stop/resume
-        // must not count the downtime gap against the machine the moment it resumes.
-        const lastPulseTime = machine.last_pulse ? new Date(machine.last_pulse).getTime() : 0;
-        const runningSinceTime = machine.running_since ? new Date(machine.running_since).getTime() : 0;
-        const baseTime = Math.max(lastPulseTime, runningSinceTime);
-        const secondsSinceLastPulse = (now.getTime() - baseTime) / 1000;
-
         // Threshold is the machine's own configured heartbeat timeout (Admin-editable per
-        // machine), falling back to the legacy ideal-cycle-time-plus-2-minutes grace period only
-        // for machines that predate this column.
-        const threshold = machine.heartbeat_timeout_seconds || (machine.ideal_cycle_time + 120);
+        // machine). The same column now backs a heartbeat-based check instead of a pulse-based
+        // one (see below) - its existing values (default 120s) remain a sensible connectivity
+        // timeout either way, so no migration/re-tuning is needed.
+        const threshold = machine.heartbeat_timeout_seconds || 30;
 
-        if (secondsSinceLastPulse > threshold) {
-          // On the Cloud, last_pulse only advances when the Edge Gateway's HTTP sync loop
-          // (syncService.js, every 5s) successfully delivers a batch - a network blip or a
-          // redeploy can stall that for minutes while the physical machine, watched by its own
-          // Edge Gateway process with real-time serial telemetry, is genuinely still running.
-          // Cloud has no serial port (sendSerialCommand no-ops there) and no low-latency signal
-          // of its own, so it must not force machines.status to Stopped on this evidence alone -
-          // doing so used to write a phantom "Stopped" status_logs row that nothing ever
-          // corrected, since the Edge Gateway only re-uploads a status row when a *real*
-          // transition happens, which a machine that never actually stopped will never produce.
-          // Cloud only ever gets to flag this as a sync-lag warning; the Edge Gateway is the
-          // sole authority allowed to actually stop the machine.
-          if (process.env.IS_EDGE_GATEWAY === 'true') {
-            logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No pulse for ${secondsSinceLastPulse.toFixed(1)}s, threshold: ${threshold}s). Setting status to Not Connected.`);
+        if (process.env.IS_EDGE_GATEWAY === 'true') {
+          // CRITICAL DESIGN FIX: connectivity (is the ESP32 physically talking to this Pi over
+          // USB serial) and production (has a machining cycle finished) are NOT the same signal.
+          // A machine can legitimately go several minutes with zero Cycle Complete pulses -
+          // measuring a part, a tool change, a program hold, a long cycle, manual load/unload -
+          // while staying fully connected the whole time. Using last_pulse for connectivity (the
+          // old behavior) meant every one of those completely normal production pauses eventually
+          // got misread as a communication failure, auto-stopping a machine that was never
+          // actually disconnected. The ESP32 now sends a lightweight {"type":"heartbeat"} every
+          // 5s (see esp32_cnc_monitor.ino) purely as a liveness signal, decoupled from production
+          // entirely - handleHeartbeatMessage() only ever touches machines.last_heartbeat, never
+          // status/counts. That's the only thing connectivity is judged on below.
+          //
+          // Backward compatibility: a machine whose firmware hasn't been reflashed yet (or that's
+          // never sent a heartbeat for any other reason) has last_heartbeat = NULL forever - for
+          // that machine only, fall back to the exact old pulse-based staleness check, so nothing
+          // regresses on hardware that isn't running the new firmware. The moment that machine's
+          // firmware IS updated and its first heartbeat arrives, it seamlessly switches over to
+          // the correct heartbeat-based check on its own - no config change needed.
+          const usingHeartbeat = Boolean(machine.last_heartbeat);
+          const lastSignalTime = usingHeartbeat
+            ? new Date(machine.last_heartbeat).getTime()
+            // Fallback (legacy firmware only): whichever is more recent of last_pulse/
+            // running_since - a stale last_pulse from before a stop/resume must not count the
+            // downtime gap against the machine the moment it resumes.
+            : Math.max(
+                machine.last_pulse ? new Date(machine.last_pulse).getTime() : 0,
+                machine.running_since ? new Date(machine.running_since).getTime() : 0
+              );
+          const secondsSinceSignal = (now.getTime() - lastSignalTime) / 1000;
+          const signalLabel = usingHeartbeat ? 'heartbeat' : 'pulse (legacy firmware, no heartbeat received yet)';
+
+          if (secondsSinceSignal > threshold) {
+            logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No ${signalLabel} for ${secondsSinceSignal.toFixed(1)}s, threshold: ${threshold}s). Setting status to Not Connected.`);
 
             // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
             // this can never fire in the middle of - or immediately undo - an operator action or
@@ -335,7 +349,7 @@ export function startWatchdogService(broadcast) {
 
               // Force-transition status to Not Connected (closes running log and creates a Not
               // Connected log, and - see handleStatusMessage - stamps last_cycle_reset_at so Last
-              // Cycle reads 0). Not "Stopped" - a machine that stopped sending heartbeats was not
+              // Cycle reads 0). Not "Stopped" - a machine that stopped communicating was not
               // necessarily manually stopped, and conflating the two hid genuine connectivity
               // loss behind a normal-looking Stopped state.
               await handleStatusMessage(machine.id, 'Not Connected');
@@ -346,10 +360,27 @@ export function startWatchdogService(broadcast) {
                 severity: 'critical',
                 machineId: machine.id,
                 machineName: machine.name,
-                message: `${machine.name} marked Not Connected: no signal for ${Math.round(secondsSinceLastPulse)}s`
+                message: `${machine.name} marked Not Connected: no ${signalLabel} for ${Math.round(secondsSinceSignal)}s`
               });
             }
-          } else {
+          }
+        } else {
+          // Cloud sync-lag warning - deliberately still pulse-based, unchanged. This measures a
+          // genuinely different thing than ESP32<->Pi connectivity above: whether the Edge
+          // Gateway's own HTTP upload pipeline (syncService.js, every 5s) is keeping up, which is
+          // exactly what a stale last_pulse on the Cloud actually reflects. Heartbeats are a
+          // purely local, real-time liveness signal between the ESP32 and its Pi - they are never
+          // uploaded to the Cloud (uploading a value every 5s just to detect a sync lag that
+          // last_pulse already detects would be redundant), so the Cloud has no heartbeat signal
+          // to check here even in principle. Cloud never forces machines.status off this signal
+          // either way - the Edge Gateway remains the sole authority allowed to actually stop a
+          // machine (see the comment on the branch above).
+          const lastPulseTime = machine.last_pulse ? new Date(machine.last_pulse).getTime() : 0;
+          const runningSinceTime = machine.running_since ? new Date(machine.running_since).getTime() : 0;
+          const baseTime = Math.max(lastPulseTime, runningSinceTime);
+          const secondsSinceLastPulse = (now.getTime() - baseTime) / 1000;
+
+          if (secondsSinceLastPulse > threshold) {
             logger.warn(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") has not synced from its Edge Gateway in ${secondsSinceLastPulse.toFixed(1)}s (threshold: ${threshold}s) - leaving status as-is, Cloud is not authoritative for stopping machines.`);
 
             if (shouldEmitAlert(`${machine.id}:sync-lag`)) {
