@@ -120,6 +120,23 @@ export async function handlePulseMessage(machineId, payload) {
     return;
   }
 
+  // CRITICAL FIX: a pulse can only ever originate from the physically wired machine actively
+  // communicating - it is direct, unambiguous proof of connectivity. If the watchdog previously
+  // force-marked this machine "Not Connected" (stale-pulse heartbeat timeout, see
+  // watchdogService.js) and it then resumes producing, nothing else in the system ever notices
+  // and self-corrects: status is only ever changed by an explicit status message, never inferred
+  // from a pulse. Without this, the dashboard is stuck showing "Not Connected" indefinitely -
+  // even while production_count keeps climbing underneath - until something incidentally
+  // triggers a fresh status message (e.g. a full service restart's serial boot-sync happening to
+  // round-trip a command). Routed through the same handleStatusMessage() transition path
+  // everything else uses (closes the stale status log, opens a fresh one, broadcasts the
+  // change) rather than duplicating that logic here.
+  if (machines[0].status === 'Not Connected') {
+    logger.info(`🔌 Machine ${machineId}: pulse received while marked Not Connected - self-healing to Running.`);
+    await handleStatusMessage(machineId, 'Running');
+    machines[0].status = 'Running';
+  }
+
   // 2. Insert pulse log into database, stamped with whichever scheduled part is currently
   // active (if any) so per-part production can be attributed correctly even when execution
   // has diverged from the plan (manual overrides, forced end-time cutovers).
