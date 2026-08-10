@@ -296,11 +296,12 @@ router.get('/reports/oee-summary', requireAuth, async (req, res) => {
       return res.status(404).json({ error: `Machine ${machineId} not found` });
     }
 
+    const effectiveGroupBy = ['day', 'shift'].includes(groupBy) ? groupBy : null;
     const report = await buildOeeReportRows(machineId, startDate, endDate, {
       shift: shift || null,
       operator: operator || null,
       partName: partName || null,
-      groupBy: groupBy || null
+      groupBy: effectiveGroupBy
     });
 
     res.json(report);

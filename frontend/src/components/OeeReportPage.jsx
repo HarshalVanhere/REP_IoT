@@ -249,6 +249,12 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
   const dtGroups = downtimeReport?.groups || [];
   const dtKpis = downtimeReport?.kpis || null;
 
+  // Gated on the active tab's OWN loading flag, not just its data being present - `kpis`/
+  // `dtKpis` stay non-null (holding the PREVIOUS machine's/filters' data) for the whole window
+  // a fetch is in flight after machineId/date/shift/etc. changes, so `!kpis` alone let these
+  // buttons stay clickable and export stale data under a filename built from the NEW selection.
+  const exportDisabled = tab === 'oee' ? (!kpis || loading) : (!dtKpis || downtimeLoading);
+
   const dtReasonsAgg = {};
   reasonCodes.forEach((r) => { dtReasonsAgg[r] = 0; });
   dtEvents.forEach((e) => { dtReasonsAgg[e.reason] = (dtReasonsAgg[e.reason] || 0) + e.durationSeconds; });
@@ -454,21 +460,21 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
           <div className="flex items-center gap-2">
             <button
               onClick={handleDownloadPdf}
-              disabled={!kpis}
+              disabled={exportDisabled}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 hover:border-[var(--primary)] text-[12px] font-black uppercase tracking-wider text-slate-600 hover:text-[var(--primary)] transition disabled:opacity-40 disabled:pointer-events-none"
             >
               <FileDown className="w-3.5 h-3.5" /> Download PDF
             </button>
             <button
               onClick={handleDownloadExcel}
-              disabled={!kpis}
+              disabled={exportDisabled}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 hover:border-emerald-600 text-[12px] font-black uppercase tracking-wider text-slate-600 hover:text-emerald-600 transition disabled:opacity-40 disabled:pointer-events-none"
             >
               <FileSpreadsheet className="w-3.5 h-3.5" /> Download Excel
             </button>
             <button
               onClick={printReport}
-              disabled={!kpis}
+              disabled={exportDisabled}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 hover:border-slate-500 text-[12px] font-black uppercase tracking-wider text-slate-600 hover:text-slate-800 transition disabled:opacity-40 disabled:pointer-events-none"
             >
               <Printer className="w-3.5 h-3.5" /> Print Report

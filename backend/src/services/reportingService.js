@@ -7,7 +7,7 @@ import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getInterva
 const PLANNED_REASONS = new Set([
   'Tea Break',
   'Lunch Break',
-  'Preventive Maintenance'
+  'Preventive Maintenance (PM)'
 ]);
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10;
