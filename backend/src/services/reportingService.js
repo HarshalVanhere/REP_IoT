@@ -1,14 +1,7 @@
 import db from '../config/db.js';
 import { SHIFT_NAMES, getShiftWindow, buildPlantDateTime, formatPlantTime } from '../config/shifts.js';
 import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getIntervalOverlapSeconds, calculateAutoTarget } from './oeeCalculator.js';
-
-// Downtime reasons treated as "Planned" for the Downtime Analysis module's Planned/Unplanned
-// split - everything else in PREDEFINED_REASONS (config/reasonCodes.js) is Unplanned.
-const PLANNED_REASONS = new Set([
-  'Tea Break',
-  'Lunch Break',
-  'Preventive Maintenance (PM)'
-]);
+import { PLANNED_REASONS } from '../config/reasonCodes.js';
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10;
 
@@ -454,6 +447,18 @@ export async function buildOeeReportRows(machineId, startDate, endDate, { shift,
         statusLogs: bulkStatusLogs,
         pulses: bulkPulses
       });
+
+      // A shift whose window has FULLY elapsed with zero Running seconds anywhere in it never
+      // actually got going - relabel any of its downtime still carrying the default 'Shift
+      // Start' reason to 'Shift not started', the same rule buildDowntimeReport already applies
+      // to the Downtime Analysis tab's reasons breakdown (kept in sync here so the OEE Report
+      // tab's own breakdown doesn't show a stale, un-relabeled 'Shift Start' total). The current
+      // in-progress shift is left alone - not yet a foregone conclusion whether it will start.
+      if (window.end.getTime() <= now && metrics.runningSeconds === 0 && metrics.downtimeReasons['Shift Start']) {
+        metrics.downtimeReasons['Shift not started'] =
+          (metrics.downtimeReasons['Shift not started'] || 0) + metrics.downtimeReasons['Shift Start'];
+        metrics.downtimeReasons['Shift Start'] = 0;
+      }
 
       // Skip shifts with nothing scheduled and nothing that happened - avoids cluttering the
       // report with rows for shifts the machine simply wasn't running in.

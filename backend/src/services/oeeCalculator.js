@@ -1,5 +1,5 @@
 import db from '../config/db.js';
-import { PREDEFINED_REASONS } from '../config/reasonCodes.js';
+import { PREDEFINED_REASONS, PLANNED_REASONS } from '../config/reasonCodes.js';
 import { getShiftForTimestamp, getCurrentShiftStart, getShiftWindow, buildPlantDateTime } from '../config/shifts.js';
 
 export { PREDEFINED_REASONS };
@@ -123,19 +123,25 @@ export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
     breaks.forEach(b => {
       overlapSeconds += getIntervalOverlapSeconds(ivStart, ivEnd, b.start, b.end);
     });
-    const durationSeconds = Math.max(0, (iv.end - iv.start) / 1000 - overlapSeconds);
+    const rawDurationSeconds = Math.max(0, (iv.end - iv.start) / 1000);
+    const durationSeconds = Math.max(0, rawDurationSeconds - overlapSeconds);
 
     if (iv.status === 'Running') {
       runningSeconds += durationSeconds;
     } else if (iv.status === 'Stopped') {
-      stoppedSeconds += durationSeconds;
-      // Group by reason if available
       const reason = iv.reason || 'Other';
-      if (downtimeReasons[reason] !== undefined) {
-        downtimeReasons[reason] += durationSeconds;
-      } else {
-        downtimeReasons['Other'] += durationSeconds;
-      }
+      const bucketReason = downtimeReasons[reason] !== undefined ? reason : 'Other';
+      // Planned-break reasons (Tea/Lunch/PM) count their FULL observed duration, not reduced
+      // by overlap with the plant's fixed break schedule - an operator's actual break rarely
+      // lines up to the minute with the schedule (left a bit early, back a bit late), and that
+      // whole span legitimately IS the break, not generic downtime that happens to coincide
+      // with one. Every other reason still excludes break overlap, matching how Planned
+      // Production Time itself excludes breaks. stoppedSeconds is accumulated from this SAME
+      // per-reason value (never computed independently) so "Total Stop Time" can never drift
+      // from the sum of the Downtime Reasons Breakdown.
+      const stoppedDurationSeconds = PLANNED_REASONS.has(bucketReason) ? rawDurationSeconds : durationSeconds;
+      stoppedSeconds += stoppedDurationSeconds;
+      downtimeReasons[bucketReason] += stoppedDurationSeconds;
     } else if (iv.status === 'Not Connected') {
       noSignalSeconds += durationSeconds;
     }

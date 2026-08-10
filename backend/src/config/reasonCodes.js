@@ -25,6 +25,18 @@ export const PREDEFINED_REASONS = [
   'Unplanned Meeting'
 ];
 
+// Reasons treated as "Planned" downtime everywhere duration/category is computed (the
+// Downtime Analysis module's Planned/Unplanned split in reportingService.js, and the
+// Stopped-time/reasons aggregation in oeeCalculator.js's aggregateStatusLogs). Single shared
+// definition so the two can never drift apart the way they previously did (this Set used to be
+// duplicated in reportingService.js with a stale 'Preventive Maintenance' string that didn't
+// match the canonical 'Preventive Maintenance (PM)' value above, silently never matching).
+export const PLANNED_REASONS = new Set([
+  'Tea Break',
+  'Lunch Break',
+  'Preventive Maintenance (PM)'
+]);
+
 // Marathi display labels for the Operator Terminal ONLY (frontend/src/components/
 // OperatorTerminal.jsx via DowntimeReasonModal.jsx) - keyed by the English canonical value
 // above. The Cloud dashboard, reports, and exports always render the English value directly and

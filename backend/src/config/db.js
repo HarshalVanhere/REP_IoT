@@ -83,7 +83,7 @@ function seedMockData() {
     'Mechanical Jam / Fault',
     'Machine Breakdown',
     'Setup / Calibration',
-    'Preventive Maintenance'
+    'Preventive Maintenance (PM)'
   ];
   
   const machinesList = ['1302', '1306', '1308', '1309', '1310', '1311', '1312', '1313'];
