@@ -552,6 +552,30 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
   const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
   const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
 
+  const now = new Date();
+
+  // A shift whose window has FULLY elapsed with zero Running seconds anywhere in it never
+  // actually got going - that's a materially different situation from the ordinary short delay
+  // between shift start and the first pulse (the ongoing/current shift, still in progress, is
+  // deliberately excluded here since it's not yet knowable whether it will start). Any downtime
+  // still carrying the default 'Shift Start' reason inside one of these windows is relabeled
+  // 'Shift not started' below, instead of silently inflating the 'Shift Start' bucket with hours
+  // that were never a startup delay at all.
+  const notStartedShiftKeys = new Set();
+  dates.forEach((dateStr) => {
+    SHIFT_NAMES.forEach((shiftName) => {
+      const window = getShiftWindow(dateStr, shiftName);
+      if (window.start.getTime() > now.getTime()) return; // future shift - nothing happened yet
+      if (window.end.getTime() > now.getTime()) return; // still in progress - not a foregone conclusion
+      const midnightForDate = getShiftWindow(dateStr, 'Shift C').start;
+      const breaksForDate = getPlannedBreaks(midnightForDate);
+      const { runningSeconds } = aggregateStatusLogs(allSorted, window.start, window.end, breaksForDate);
+      if (runningSeconds === 0) {
+        notStartedShiftKeys.add(`${dateStr}|${shiftName}`);
+      }
+    });
+  });
+
   // A single continuous "Stopped" status_logs row can predate rangeStart (a stoppage that began
   // days ago and is still open) or run past rangeEnd/"now". Attributing its FULL raw duration to
   // whichever shift its original start_time happened to fall in - as a naive "one log = one
@@ -581,15 +605,34 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
           const overlapEnd = new Date(Math.min(logEnd.getTime(), window.end.getTime()));
           if (overlapEnd <= overlapStart) return;
 
+          // Exclude planned-break overlap from the counted duration, matching how
+          // computeWindowMetrics/aggregateStatusLogs (oeeCalculator.js) already exclude breaks
+          // from both Planned Production Time and Operating Time. Without this, a Stopped log
+          // spanning a Tea/Lunch break counted that break's minutes as downtime here but not in
+          // the OEE Report tab's Downtime tile, which is why the two totals never matched.
+          const midnightForDate = getShiftWindow(dateStr, 'Shift C').start;
+          const breaksForDate = getPlannedBreaks(midnightForDate);
+          const breakOverlapSeconds = breaksForDate.reduce(
+            (s, b) => s + getIntervalOverlapSeconds(overlapStart, overlapEnd, b.start, b.end),
+            0
+          );
+          const durationSeconds = Math.max(0, (overlapEnd.getTime() - overlapStart.getTime()) / 1000 - breakOverlapSeconds);
+          if (durationSeconds <= 0) return;
+
+          const shiftKey = `${dateStr}|${shiftName}`;
+          const effectiveReason = reason === 'Shift Start' && notStartedShiftKeys.has(shiftKey)
+            ? 'Shift not started'
+            : reason;
+
           allEvents.push({
             id: `${log.id}-${dateStr}-${shiftName}`,
             date: dateStr,
             shift: shiftName,
             startTime: overlapStart,
             endTime: overlapEnd.getTime() === logEndRaw.getTime() ? log.end_time : overlapEnd,
-            durationSeconds: (overlapEnd.getTime() - overlapStart.getTime()) / 1000,
-            reason,
-            category: PLANNED_REASONS.has(reason) ? 'Planned' : 'Unplanned',
+            durationSeconds,
+            reason: effectiveReason,
+            category: PLANNED_REASONS.has(effectiveReason) ? 'Planned' : 'Unplanned',
             operator: log.operator_id,
             partNumber: log.part_name,
             statusBefore: before,
