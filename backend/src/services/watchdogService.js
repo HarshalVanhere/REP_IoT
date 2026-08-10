@@ -302,66 +302,115 @@ export function startWatchdogService(broadcast) {
         const threshold = machine.heartbeat_timeout_seconds || 30;
 
         if (process.env.IS_EDGE_GATEWAY === 'true') {
-          // CRITICAL DESIGN FIX: connectivity (is the ESP32 physically talking to this Pi over
-          // USB serial) and production (has a machining cycle finished) are NOT the same signal.
-          // A machine can legitimately go several minutes with zero Cycle Complete pulses -
-          // measuring a part, a tool change, a program hold, a long cycle, manual load/unload -
-          // while staying fully connected the whole time. Using last_pulse for connectivity (the
-          // old behavior) meant every one of those completely normal production pauses eventually
-          // got misread as a communication failure, auto-stopping a machine that was never
-          // actually disconnected. The ESP32 now sends a lightweight {"type":"heartbeat"} every
-          // 5s (see esp32_cnc_monitor.ino) purely as a liveness signal, decoupled from production
-          // entirely - handleHeartbeatMessage() only ever touches machines.last_heartbeat, never
-          // status/counts. That's the only thing connectivity is judged on below.
-          //
-          // Backward compatibility: a machine whose firmware hasn't been reflashed yet (or that's
-          // never sent a heartbeat for any other reason) has last_heartbeat = NULL forever - for
-          // that machine only, fall back to the exact old pulse-based staleness check, so nothing
-          // regresses on hardware that isn't running the new firmware. The moment that machine's
-          // firmware IS updated and its first heartbeat arrives, it seamlessly switches over to
-          // the correct heartbeat-based check on its own - no config change needed.
+          // Connectivity ("Not Connected") is judged ONLY on the heartbeat signal - never on
+          // last_pulse / production-cycle timing. A machine with no heartbeat yet (legacy
+          // firmware not reflashed) has no real connectivity signal to check, so it is simply
+          // skipped here rather than substituting last_pulse, which would misread a normal idle
+          // production pause as a communication failure.
           const usingHeartbeat = Boolean(machine.last_heartbeat);
-          const lastSignalTime = usingHeartbeat
-            ? new Date(machine.last_heartbeat).getTime()
-            // Fallback (legacy firmware only): whichever is more recent of last_pulse/
-            // running_since - a stale last_pulse from before a stop/resume must not count the
-            // downtime gap against the machine the moment it resumes.
-            : Math.max(
-                machine.last_pulse ? new Date(machine.last_pulse).getTime() : 0,
-                machine.running_since ? new Date(machine.running_since).getTime() : 0
-              );
-          const secondsSinceSignal = (now.getTime() - lastSignalTime) / 1000;
-          const signalLabel = usingHeartbeat ? 'heartbeat' : 'pulse (legacy firmware, no heartbeat received yet)';
 
-          if (secondsSinceSignal > threshold) {
-            logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No ${signalLabel} for ${secondsSinceSignal.toFixed(1)}s, threshold: ${threshold}s). Setting status to Not Connected.`);
+          if (usingHeartbeat) {
+            const secondsSinceSignal = (now.getTime() - new Date(machine.last_heartbeat).getTime()) / 1000;
 
-            // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
-            // this can never fire in the middle of - or immediately undo - an operator action or
-            // a schedule sync that's already in flight for the same machine.
-            await withMachineLock(machine.id, async () => {
-              // Trigger physical machine lockout interlock relay
-              try {
-                await sendSerialCommand(machine.id, 'stop');
-              } catch (serialErr) {
-                logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
-              }
+            if (secondsSinceSignal > threshold) {
+              logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is stale (No heartbeat for ${secondsSinceSignal.toFixed(1)}s, threshold: ${threshold}s). Setting status to Not Connected.`);
 
-              // Force-transition status to Not Connected (closes running log and creates a Not
-              // Connected log, and - see handleStatusMessage - stamps last_cycle_reset_at so Last
-              // Cycle reads 0). Not "Stopped" - a machine that stopped communicating was not
-              // necessarily manually stopped, and conflating the two hid genuine connectivity
-              // loss behind a normal-looking Stopped state.
-              await handleStatusMessage(machine.id, 'Not Connected');
-            });
+              // Serialized against /stop, /resume, and pullMachineConfig's own force-stop path so
+              // this can never fire in the middle of - or immediately undo - an operator action or
+              // a schedule sync that's already in flight for the same machine.
+              await withMachineLock(machine.id, async () => {
+                // Trigger physical machine lockout interlock relay
+                try {
+                  await sendSerialCommand(machine.id, 'stop');
+                } catch (serialErr) {
+                  logger.warn(`Watchdog: Failed to send interlock stop command: ${serialErr.message}`);
+                }
 
-            if (shouldEmitAlert(`${machine.id}:stale`)) {
-              emitAlert({
-                severity: 'critical',
-                machineId: machine.id,
-                machineName: machine.name,
-                message: `${machine.name} marked Not Connected: no ${signalLabel} for ${Math.round(secondsSinceSignal)}s`
+                // Force-transition status to Not Connected (closes running log and creates a Not
+                // Connected log, and - see handleStatusMessage - stamps last_cycle_reset_at so Last
+                // Cycle reads 0). Not "Stopped" - a machine that stopped communicating was not
+                // necessarily manually stopped, and conflating the two hid genuine connectivity
+                // loss behind a normal-looking Stopped state.
+                await handleStatusMessage(machine.id, 'Not Connected');
               });
+
+              if (shouldEmitAlert(`${machine.id}:stale`)) {
+                emitAlert({
+                  severity: 'critical',
+                  machineId: machine.id,
+                  machineName: machine.name,
+                  message: `${machine.name} marked Not Connected: no heartbeat for ${Math.round(secondsSinceSignal)}s`
+                });
+              }
+            }
+          }
+
+          // Production-cycle timeout: separate from, and never a cause of, "Not Connected" above.
+          // A Running machine that hasn't produced a valid Cycle Complete pulse within
+          // ideal_cycle_time + 120s is stuck/idle mid-cycle, not disconnected - connectivity is
+          // judged solely by the heartbeat check above. This only ever results in "Stopped",
+          // exactly as if an operator had pressed Stop, and never touches last_heartbeat.
+          if (machine.status === 'Running') {
+            const idealTime = machine.ideal_cycle_time || 15;
+            const timeoutSeconds = idealTime + 120;
+
+            // Most recent of last_pulse / running_since - last_pulse can be a stale leftover from
+            // BEFORE the current Start/Resume, so anchoring on running_since when it's more recent
+            // gives every fresh Start/Resume a full idealTime+120s grace window instead of being
+            // judged stale on its very first tick.
+            const lastPulseTime = machine.last_pulse ? new Date(machine.last_pulse).getTime() : 0;
+            const runningSinceTime = machine.running_since ? new Date(machine.running_since).getTime() : 0;
+            const lastValidPulseTime = Math.max(lastPulseTime, runningSinceTime);
+
+            if (lastValidPulseTime === 0) {
+              // Neither timestamp available - refuse to compute a timeout off Unix epoch 0, which
+              // would always appear massively overdue and auto-stop the machine incorrectly.
+              logger.warn(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") is Running but has neither last_pulse nor running_since - skipping cycle-timeout check this tick.`);
+            } else {
+              const secondsSinceLastPulse = (now.getTime() - lastValidPulseTime) / 1000;
+              logger.info(`⏰ Watchdog: Machine ${machine.id} cycle-timeout check - status=${machine.status}, idealTime=${idealTime}s, last_pulse=${machine.last_pulse || 'null'}, running_since=${machine.running_since || 'null'}, lastValidPulseTime=${new Date(lastValidPulseTime).toISOString()}, secondsSinceLastPulse=${secondsSinceLastPulse.toFixed(1)}s, timeout=${timeoutSeconds}s.`);
+
+              if (secondsSinceLastPulse > timeoutSeconds) {
+                let stoppedNow = false;
+
+                // Same lock as the connectivity path above. Re-reads current DB status inside the
+                // lock because the batch SELECT at the top of this tick can be stale by the time
+                // we get here - an operator's manual /stop or /resume, or the heartbeat check just
+                // above, may have already changed it. Only proceed if it is STILL exactly
+                // 'Running'; otherwise abort without sending another stop command or touching status.
+                await withMachineLock(machine.id, async () => {
+                  const [freshRows] = await db.query('SELECT status FROM machines WHERE id = ?', [machine.id]);
+                  const freshStatus = freshRows.length > 0 ? freshRows[0].status : null;
+
+                  if (freshStatus !== 'Running') {
+                    logger.info(`⏰ Watchdog: Machine ${machine.id} cycle-timeout fired but current DB status is "${freshStatus}" (not Running) - aborting auto-stop.`);
+                    return;
+                  }
+
+                  logger.info(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") exceeded cycle timeout (idealTime ${idealTime}s + 120s = ${timeoutSeconds}s, elapsed ${secondsSinceLastPulse.toFixed(1)}s). Auto-stopping (status -> Stopped; connectivity unaffected).`);
+
+                  try {
+                    await sendSerialCommand(machine.id, 'stop');
+                  } catch (serialErr) {
+                    logger.warn(`Watchdog: Failed to send interlock stop command (cycle timeout): ${serialErr.message}`);
+                  }
+
+                  // "Stopped", never "Not Connected" - the machine is still communicating
+                  // (heartbeat is judged independently above), it simply did not complete a cycle
+                  // in time. Nothing here touches last_heartbeat, so connectivity is untouched.
+                  await handleStatusMessage(machine.id, 'Stopped');
+                  stoppedNow = true;
+                });
+
+                if (stoppedNow && shouldEmitAlert(`${machine.id}:cycle-timeout`)) {
+                  emitAlert({
+                    severity: 'warning',
+                    machineId: machine.id,
+                    machineName: machine.name,
+                    message: `${machine.name} auto-stopped: no cycle-complete pulse for ${Math.round(secondsSinceLastPulse)}s (ideal cycle ${idealTime}s + 120s grace)`
+                  });
+                }
+              }
             }
           }
         } else {

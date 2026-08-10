@@ -3,6 +3,7 @@ import net from 'net';
 import db from '../config/db.js';
 import { calculateOEE } from './oeeCalculator.js';
 import { logger } from '../utils/logger.js';
+import { withMachineLock } from '../utils/machineLock.js';
 
 let aedesInstance = null;
 let server = null;
@@ -187,7 +188,12 @@ export async function handlePulseMessage(machineId, payload) {
 export async function handleHeartbeatMessage(machineId) {
   const timestamp = new Date();
   timestamp.setMilliseconds(0);
-  await db.query('UPDATE machines SET last_heartbeat = ? WHERE id = ?', [timestamp, machineId]);
+  // Serialized against watchdogService.js's connectivity check via the same per-machine lock -
+  // this write and the watchdog's stale/fresh read-and-decide must never interleave, otherwise
+  // the watchdog can act on a last_heartbeat value that's about to be superseded.
+  await withMachineLock(machineId, async () => {
+    await db.query('UPDATE machines SET last_heartbeat = ? WHERE id = ?', [timestamp, machineId]);
+  });
 }
 
 /**
