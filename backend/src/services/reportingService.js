@@ -605,24 +605,32 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
           const overlapEnd = new Date(Math.min(logEnd.getTime(), window.end.getTime()));
           if (overlapEnd <= overlapStart) return;
 
-          // Exclude planned-break overlap from the counted duration, matching how
-          // computeWindowMetrics/aggregateStatusLogs (oeeCalculator.js) already exclude breaks
-          // from both Planned Production Time and Operating Time. Without this, a Stopped log
-          // spanning a Tea/Lunch break counted that break's minutes as downtime here but not in
-          // the OEE Report tab's Downtime tile, which is why the two totals never matched.
-          const midnightForDate = getShiftWindow(dateStr, 'Shift C').start;
-          const breaksForDate = getPlannedBreaks(midnightForDate);
-          const breakOverlapSeconds = breaksForDate.reduce(
-            (s, b) => s + getIntervalOverlapSeconds(overlapStart, overlapEnd, b.start, b.end),
-            0
-          );
-          const durationSeconds = Math.max(0, (overlapEnd.getTime() - overlapStart.getTime()) / 1000 - breakOverlapSeconds);
-          if (durationSeconds <= 0) return;
-
           const shiftKey = `${dateStr}|${shiftName}`;
           const effectiveReason = reason === 'Shift Start' && notStartedShiftKeys.has(shiftKey)
             ? 'Shift not started'
             : reason;
+
+          // Exclude planned-break overlap from the counted duration - but ONLY when this event's
+          // own reason is something OTHER than the break itself (e.g. 'Shift not started' bleeding
+          // through the plant's scheduled Shift C tea breaks, which shouldn't inflate that bucket).
+          // This mirrors how computeWindowMetrics/aggregateStatusLogs (oeeCalculator.js) exclude
+          // scheduled-break time from Planned Production Time/Operating Time for generic downtime.
+          // When the reason IS 'Tea Break'/'Lunch Break'/etc, the operator's actual stoppage rarely
+          // lines up exactly with the plant's fixed schedule (left 2 min early, back 4 min late) -
+          // subtracting the scheduled window's overlap from it would wrongly shave a real ~36-minute
+          // lunch stoppage down to ~7 minutes just because most of it coincided with the schedule.
+          // The full observed duration belongs entirely to that break reason.
+          let durationSeconds = (overlapEnd.getTime() - overlapStart.getTime()) / 1000;
+          if (!PLANNED_REASONS.has(effectiveReason)) {
+            const midnightForDate = getShiftWindow(dateStr, 'Shift C').start;
+            const breaksForDate = getPlannedBreaks(midnightForDate);
+            const breakOverlapSeconds = breaksForDate.reduce(
+              (s, b) => s + getIntervalOverlapSeconds(overlapStart, overlapEnd, b.start, b.end),
+              0
+            );
+            durationSeconds = Math.max(0, durationSeconds - breakOverlapSeconds);
+          }
+          if (durationSeconds <= 0) return;
 
           allEvents.push({
             id: `${log.id}-${dateStr}-${shiftName}`,
