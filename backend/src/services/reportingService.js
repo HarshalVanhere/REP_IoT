@@ -688,6 +688,109 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
 }
 
 /**
+ * Plant-wide (or single-machine, via `machineId`) summary for one calendar date, optionally
+ * scoped to a shift/operator/part - the single source of truth for every plant-level surface
+ * (Overview "Plant OEE", "Loss Bottleneck Cause", the executive CSV export). Deliberately does
+ * NOT reimplement any downtime/OEE math: it calls buildDowntimeReport()/buildOeeReportRows() once
+ * per machine (the same functions the Downtime Analysis and OEE Report tabs call directly) and
+ * combines their already-correct per-machine kpis - re-deriving Availability/Performance/Quality/
+ * OEE from the summed seconds/counts via computeOeeFromTotals (never averaging percentages),
+ * exactly like summarizeKpis() above does for a single machine's multi-row report.
+ */
+export async function buildPlantSummary(dateStr, { shift, operator, partName, machineId } = {}) {
+  const [machineRows] = await db.query(
+    machineId
+      ? 'SELECT id, name, iot_enabled FROM machines WHERE id = ?'
+      : 'SELECT id, name, iot_enabled FROM machines',
+    machineId ? [machineId] : []
+  );
+
+  const perMachine = [];
+  for (const m of machineRows) {
+    if (!m.iot_enabled) continue;
+    const [dt, oee] = await Promise.all([
+      buildDowntimeReport(m.id, dateStr, dateStr, 'day', { shift: shift || null, operator: operator || null, partName: partName || null }),
+      buildOeeReportRows(m.id, dateStr, dateStr, { shift: shift || null, operator: operator || null, partName: partName || null })
+    ]);
+    perMachine.push({
+      machineId: m.id,
+      machineName: m.name,
+      totalDowntimeSeconds: dt.kpis?.totalDowntimeSeconds || 0,
+      plannedDowntimeSeconds: dt.kpis?.plannedDowntimeSeconds || 0,
+      totalEvents: dt.kpis?.totalEvents || 0,
+      events: dt.events || [],
+      oeeKpis: oee.kpis || null
+    });
+  }
+
+  const totalDowntimeSeconds = perMachine.reduce((s, m) => s + m.totalDowntimeSeconds, 0);
+  const plannedDowntimeSeconds = perMachine.reduce((s, m) => s + m.plannedDowntimeSeconds, 0);
+  const unplannedDowntimeSeconds = totalDowntimeSeconds - plannedDowntimeSeconds;
+  const totalEvents = perMachine.reduce((s, m) => s + m.totalEvents, 0);
+
+  // Top bottleneck reason, summed in seconds across every machine's already-clipped, already-
+  // break-adjusted event list - never a raw end-start read of unbounded/open status_logs rows.
+  const reasonTotals = {};
+  perMachine.forEach((m) => {
+    m.events.forEach((e) => {
+      reasonTotals[e.reason] = (reasonTotals[e.reason] || 0) + e.durationSeconds;
+    });
+  });
+  let topReason = null;
+  let topReasonSeconds = 0;
+  Object.entries(reasonTotals).forEach(([reason, seconds]) => {
+    if (seconds > topReasonSeconds) {
+      topReasonSeconds = seconds;
+      topReason = reason;
+    }
+  });
+
+  const validOee = perMachine.filter((m) => m.oeeKpis);
+  const sum = (field) => validOee.reduce((s, m) => s + (m.oeeKpis[field] || 0), 0);
+  const plannedProductionSeconds = sum('plannedProductionSeconds');
+  const operatingSeconds = sum('operatingSeconds');
+  const totalCount = sum('totalCount');
+  const goodCount = sum('goodCount');
+  const idealCycleTimes = [...new Set(validOee.map((m) => m.oeeKpis.idealCycleTime))];
+  const idealCycleTime = idealCycleTimes.length === 1
+    ? idealCycleTimes[0]
+    : (totalCount > 0 ? operatingSeconds / totalCount : (idealCycleTimes[0] || 0));
+
+  const { availability, performance, quality, oee } = computeOeeFromTotals({
+    plannedSeconds: plannedProductionSeconds, operatingSeconds, totalCount, goodCount, idealCycleTime
+  });
+
+  return {
+    date: dateStr,
+    shift: shift || null,
+    operator: operator || null,
+    partName: partName || null,
+    kpis: {
+      totalDowntimeSeconds,
+      plannedDowntimeSeconds,
+      unplannedDowntimeSeconds,
+      totalEvents,
+      topReason,
+      topReasonSeconds,
+      plannedProductionSeconds,
+      operatingSeconds,
+      totalCount,
+      goodCount,
+      availability: round1(availability),
+      performance: round1(performance),
+      quality: round1(quality),
+      oee: round1(oee)
+    },
+    perMachine: perMachine.map((m) => ({
+      machineId: m.machineId,
+      machineName: m.machineName,
+      totalDowntimeSeconds: m.totalDowntimeSeconds,
+      oee: m.oeeKpis?.oee ?? null
+    }))
+  };
+}
+
+/**
  * Slices one (machine, date, shift) into 1-hour buckets (relative to the shift's own start, not
  * clock-aligned - Shift B starts at 15:30, so its buckets are [15:30-16:30), [16:30-17:30), ...)
  * for the Analytics module's "Hourly Production & OEE Trend" chart:

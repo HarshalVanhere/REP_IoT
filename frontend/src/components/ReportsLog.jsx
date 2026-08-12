@@ -1,15 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Download, FileText, RefreshCw, Search, SlidersHorizontal, User } from 'lucide-react';
-
-function getShiftFromTimestamp(timestamp) {
-  if (!timestamp) return 'Shift A';
-
-  const date = new Date(timestamp);
-  const minutes = date.getHours() * 60 + date.getMinutes();
-  if (minutes >= 7 * 60 && minutes < 15.5 * 60) return 'Shift A';
-  if (minutes >= 15.5 * 60 && minutes < 24 * 60) return 'Shift B';
-  return 'Shift C';
-}
+import { getShiftForTimestamp as getShiftFromTimestamp } from '../lib/shiftTime';
 
 function getDurationSeconds(start, end) {
   const startTime = new Date(start).getTime();

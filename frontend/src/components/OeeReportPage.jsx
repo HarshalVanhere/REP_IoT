@@ -186,7 +186,13 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
   }, [machineId, startDate, endDate, shift, operator, partName, authToken]);
 
   useEffect(() => {
-    if (!machineId || !startDate || !endDate || tab !== 'downtime') return undefined;
+    // No `tab` gate here on purpose: fetching only while the Downtime Analysis tab was active
+    // meant switching to it could show a report fetched minutes/hours earlier (or, for a
+    // completed historical shift, whatever was last fetched while it was still in progress) -
+    // instead of the CURRENT/final backend result for the active filters. Both tabs now always
+    // stay in sync with the same machineId/date/shift/operator/part selection, matching the OEE
+    // Report effect above.
+    if (!machineId || !startDate || !endDate) return undefined;
     let cancelled = false;
     setDowntimeLoading(true);
 
@@ -204,8 +210,11 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
       .finally(() => { if (!cancelled) setDowntimeLoading(false); });
 
     return () => { cancelled = true; };
+    // `tab` intentionally excluded: the fetch now depends only on the actual query parameters,
+    // not on which tab happens to be visible, so switching tabs never itself triggers a redundant
+    // re-fetch of data that's already current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machineId, startDate, endDate, shift, operator, partName, downtimeGroupBy, tab, authToken]);
+  }, [machineId, startDate, endDate, shift, operator, partName, downtimeGroupBy, authToken]);
 
   const rows = report?.rows || [];
   const kpis = report?.kpis || null;

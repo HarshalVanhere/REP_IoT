@@ -8,10 +8,10 @@ import { resetProductionCounters } from '../services/productionRecordService.js'
 import { requireAuth, requireRole, requireSyncKey } from '../middleware/auth.js';
 import { recordAuditLog } from '../utils/auditLog.js';
 import { PREDEFINED_REASONS, REASON_LABELS_MR } from '../config/reasonCodes.js';
-import { getShiftForTimestamp, toDateOnlyString, SHIFT_NAMES } from '../config/shifts.js';
+import { getShiftForTimestamp, toDateOnlyString, getShiftWindow, SHIFT_NAMES } from '../config/shifts.js';
 import { logger } from '../utils/logger.js';
 import { withMachineLock } from '../utils/machineLock.js';
-import { buildOeeReportRows, buildDowntimeReport, buildHourlyBreakdown } from '../services/reportingService.js';
+import { buildOeeReportRows, buildDowntimeReport, buildHourlyBreakdown, buildPlantSummary } from '../services/reportingService.js';
 
 const router = express.Router();
 
@@ -176,21 +176,84 @@ router.post('/machines/:id/resume', requireAuth, requireRole('Operator', 'Superv
 });
 
 /**
- * Fetch logs history for plant management reports
+ * Fetch logs history for plant management reports.
+ * With no filters, keeps the original "last 100 across every machine" quick-glance behavior.
+ * When scoped to a machine and/or a plant-timezone-safe [startDate, endDate] day range (via
+ * getShiftWindow('Shift C'), the same day-boundary helper the report builders use), the row cap
+ * is raised so a specific selection's rows can't silently age out of an unrelated global cap -
+ * that gap previously let a real, still-open downtime event (predating whatever's currently
+ * "recent" plant-wide) disappear entirely from the Reports Log/Overview bottleneck calculation
+ * for a date/machine it actually belongs to.
  */
 router.get('/reports', requireAuth, async (req, res) => {
   try {
+    const { machineId, startDate, endDate } = req.query;
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    const conditions = [];
+    const params = [];
+
+    if (machineId) {
+      conditions.push('sl.machine_id = ?');
+      params.push(machineId);
+    }
+
+    let scoped = Boolean(machineId);
+    if (startDate && endDate && DATE_RE.test(startDate) && DATE_RE.test(endDate)) {
+      const rangeStart = getShiftWindow(startDate, 'Shift C').start;
+      const rangeEnd = new Date(getShiftWindow(endDate, 'Shift C').start.getTime() + 24 * 3600000);
+      conditions.push('sl.start_time < ? AND (sl.end_time IS NULL OR sl.end_time > ?)');
+      params.push(rangeEnd, rangeStart);
+      scoped = true;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = scoped ? 'LIMIT 2000' : 'LIMIT 100';
+
     const [reports] = await db.query(`
       SELECT sl.id, sl.machine_id, m.name as machine_name, m.department as machine_section, sl.status, sl.start_time, sl.end_time, sl.downtime_reason, sl.operator_id, sl.part_name
       FROM status_logs sl
       JOIN machines m ON sl.machine_id = m.id
+      ${whereClause}
       ORDER BY sl.start_time DESC
-      LIMIT 100
-    `);
+      ${limitClause}
+    `, params);
     res.json(reports);
   } catch (err) {
     logger.error('API/Reports Error:', err.message);
     res.status(500).json({ error: 'Failed to retrieve reports log' });
+  }
+});
+
+/**
+ * GET /api/reports/plant-summary?date&shift&operator&partName&machineId
+ * Plant-wide (or single-machine, via machineId) downtime + OEE summary for one calendar date -
+ * the single source of truth behind Overview's "Plant OEE" and "Loss Bottleneck Cause" tiles and
+ * the "Export Executive CSV" report. Never computes downtime/OEE itself: see
+ * buildPlantSummary() in reportingService.js, which calls the same buildDowntimeReport()/
+ * buildOeeReportRows() the Downtime Analysis and OEE Report tabs use directly.
+ */
+router.get('/reports/plant-summary', requireAuth, async (req, res) => {
+  const { date, shift, operator, partName, machineId } = req.query;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!date || !DATE_RE.test(date)) {
+    return res.status(400).json({ error: 'Valid date query param (YYYY-MM-DD) is required' });
+  }
+  if (shift && !SHIFT_NAMES.includes(shift)) {
+    return res.status(400).json({ error: `shift must be one of: ${SHIFT_NAMES.join(', ')}` });
+  }
+
+  try {
+    const summary = await buildPlantSummary(date, {
+      shift: shift || null,
+      operator: operator || null,
+      partName: partName || null,
+      machineId: machineId || null
+    });
+    res.json(summary);
+  } catch (err) {
+    logger.error('API Error: GET /reports/plant-summary:', err.message);
+    res.status(500).json({ error: 'Failed to build plant summary' });
   }
 });
 

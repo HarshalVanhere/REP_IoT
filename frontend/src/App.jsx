@@ -57,20 +57,11 @@ function ViewLoadingFallback() {
   );
 }
 import { WS_URL, apiFetch, AuthError } from './lib/api';
+import { getShiftForTimestamp, toPlantDateString } from './lib/shiftTime';
 
 const SHIFT_OPTIONS = ['All Shifts', 'Shift A', 'Shift B', 'Shift C'];
 const STATUS_OPTIONS = ['All', 'Running', 'Stopped', 'Not Connected'];
 const ROLE_OPTIONS = ['Supervisor', 'PPC Engineer', 'Admin', 'Operator'];
-
-function getShiftFromTimestamp(timestamp) {
-  if (!timestamp) return 'Shift A';
-
-  const d = new Date(timestamp);
-  const minutes = d.getHours() * 60 + d.getMinutes();
-  if (minutes >= 7 * 60 && minutes < 15.5 * 60) return 'Shift A';
-  if (minutes >= 15.5 * 60 && minutes < 24 * 60) return 'Shift B';
-  return 'Shift C';
-}
 
 function AppShell() {
   const { showToast } = useToast();
@@ -139,6 +130,15 @@ function AppShell() {
   const [shiftFilter, setShiftFilter] = useState('All Shifts');
   const [machineFilter, setMachineFilter] = useState('All Machines');
   const [dateFilter, setDateFilter] = useState('');
+
+  // Backend-verified plant-wide (or single-machine, when machineFilter narrows it) downtime/OEE
+  // summary for whatever the Overview filters currently select - the single source of truth for
+  // the "Plant OEE"/"OEE Rating" and "Loss Bottleneck Cause" tiles and the executive CSV export.
+  // Never computed client-side: GET /api/reports/plant-summary calls buildDowntimeReport()/
+  // buildOeeReportRows() per machine (the same functions the OEE Report/Downtime Analysis tabs
+  // use directly) and combines their results server-side.
+  const [plantSummary, setPlantSummary] = useState(null);
+  const [plantSummaryLoading, setPlantSummaryLoading] = useState(false);
 
   // Local state for modal fields before applying
   const [tempStatus, setTempStatus] = useState('All');
@@ -265,9 +265,20 @@ function AppShell() {
     setInitialLoadComplete(false);
   };
 
-  const fetchReports = async () => {
+  // With no filters, mirrors the original "last 100, plant-wide" quick-glance call. When scoped
+  // to a machine/date (see the effect below), passes those through as server-side query params
+  // instead of relying on the unfiltered top-100 result to still happen to contain them - that
+  // gap previously let a real downtime event for the selected machine/date age out of the
+  // Reports Log/CSV export/bottleneck calculation entirely once enough other activity pushed it
+  // past a global cap.
+  const fetchReports = async (filters = {}) => {
     try {
-      const reportsList = await apiFetch('/api/reports', { token: authToken });
+      const params = new URLSearchParams();
+      if (filters.machineId) params.set('machineId', filters.machineId);
+      if (filters.startDate) params.set('startDate', filters.startDate);
+      if (filters.endDate) params.set('endDate', filters.endDate);
+      const qs = params.toString();
+      const reportsList = await apiFetch(`/api/reports${qs ? `?${qs}` : ''}`, { token: authToken });
       setReports(reportsList);
     } catch (err) {
       if (!handleAuthError(err)) console.error('Failed to fetch reports logs:', err.message);
@@ -296,7 +307,9 @@ function AppShell() {
         );
 
         setHistories(Object.fromEntries(historyEntries));
-        await fetchReports();
+        // Reports Log's initial fetch now happens in the filter-driven effect below (fires once
+        // initialLoadComplete flips true) - keeps a single fetchReports call site instead of one
+        // here plus another on the first filter-effect run.
         await fetchUserAccounts();
         await fetchAuditLog();
       }
@@ -475,7 +488,49 @@ function AppShell() {
     return () => clearInterval(pollInterval);
   }, [authToken, socketConnected, initialLoadComplete, isKioskMode]);
 
+  // Re-scope the Reports Log to whatever machine/date is currently selected, server-side -
+  // fixes the top-100-cap gap described above `fetchReports`. Historical-report fetches only
+  // (page load + filter changes), no polling: a completed shift's log rows don't change once
+  // filtered to a specific machine/date.
+  useEffect(() => {
+    if (!authToken || !initialLoadComplete || isKioskMode) return undefined;
+    const filters = {};
+    if (machineFilter !== 'All Machines') filters.machineId = machineFilter;
+    if (dateFilter) {
+      filters.startDate = dateFilter;
+      filters.endDate = dateFilter;
+    }
+    fetchReports(filters);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machineFilter, dateFilter, authToken, initialLoadComplete, isKioskMode]);
 
+  // Plant OEE / Loss Bottleneck Cause / executive CSV export - all backed by the same
+  // GET /api/reports/plant-summary call, scoped to the Overview page's own machine/date/shift
+  // filters (defaulting the date to "today" in the plant's timezone when no date is picked, same
+  // as the "Today" label already shown next to the date filter). Fetches on page load and
+  // whenever a filter changes - no interval/polling, since a completed shift's totals don't
+  // change on their own; a currently-in-progress shift is picked up next time a filter changes
+  // or the page reloads, same cadence as every other historical report in this app.
+  useEffect(() => {
+    if (!authToken || !initialLoadComplete || isKioskMode) return undefined;
+    let cancelled = false;
+    setPlantSummaryLoading(true);
+
+    const params = new URLSearchParams({ date: dateFilter || toPlantDateString() });
+    if (shiftFilter !== 'All Shifts') params.set('shift', shiftFilter);
+    if (machineFilter !== 'All Machines') params.set('machineId', machineFilter);
+
+    apiFetch(`/api/reports/plant-summary?${params.toString()}`, { token: authToken })
+      .then((data) => { if (!cancelled) setPlantSummary(data); })
+      .catch((err) => {
+        if (cancelled) return;
+        if (!handleAuthError(err)) console.error('Failed to fetch plant summary:', err.message);
+      })
+      .finally(() => { if (!cancelled) setPlantSummaryLoading(false); });
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateFilter, shiftFilter, machineFilter, authToken, initialLoadComplete, isKioskMode]);
 
   const handleResetCount = async (machineId) => {
     try {
@@ -669,26 +724,15 @@ function AppShell() {
     exportToCSV(headers, data, filename);
   };
 
-  // Calculate live bottleneck cause from reports logs
+  // Backend-verified bottleneck cause for the current machine/date/shift selection - sourced
+  // from plantSummary (GET /api/reports/plant-summary), which sums each machine's already
+  // shift-clipped, break-adjusted buildDowntimeReport() event list. No longer derived from the
+  // raw, unclipped, NULL-reason-dropping status_logs read that used to live here.
   const calculateBottleneckReason = () => {
-    const reasonsMap = {};
-    filteredReports.forEach(log => {
-      if (log.status === 'Stopped' && log.downtime_reason) {
-        const start = new Date(log.start_time).getTime();
-        const end = log.end_time ? new Date(log.end_time).getTime() : Date.now();
-        const durationMins = Math.round((end - start) / 60000);
-        reasonsMap[log.downtime_reason] = (reasonsMap[log.downtime_reason] || 0) + durationMins;
-      }
-    });
-    let topReason = 'None';
-    let maxDuration = 0;
-    Object.keys(reasonsMap).forEach(r => {
-      if (reasonsMap[r] > maxDuration) {
-        maxDuration = reasonsMap[r];
-        topReason = r;
-      }
-    });
-    return topReason === 'None' ? 'No stoppages recorded' : `${topReason} (${Math.round(maxDuration / 60)}h ${maxDuration % 60}m)`;
+    const kpis = plantSummary?.kpis;
+    if (!kpis || !kpis.topReason) return 'No stoppages recorded';
+    const totalMin = Math.round(kpis.topReasonSeconds / 60);
+    return `${kpis.topReason} (${Math.floor(totalMin / 60)}h ${totalMin % 60}m)`;
   };
 
   // Calculate total plant scrap percentage
@@ -715,8 +759,10 @@ function AppShell() {
   });
 
   const filteredReports = reports.filter((report) => {
-    const reportShift = getShiftFromTimestamp(report.start_time);
-    const reportDate = report.start_time ? new Date(report.start_time).toISOString().slice(0, 10) : '';
+    // PLANT_TIMEZONE-safe shift/date bucketing (frontend/src/lib/shiftTime.js) - matches the
+    // backend's shifts.js exactly, instead of the browser's own local clock.
+    const reportShift = getShiftForTimestamp(report.start_time);
+    const reportDate = report.start_time ? toPlantDateString(report.start_time) : '';
 
     const searchMatches = !normalizedSearch || [
       report.machine_name,
@@ -804,9 +850,11 @@ function AppShell() {
     );
   }
 
-  const averageOee = filteredMachines.length > 0
-    ? filteredMachines.reduce((sum, machine) => sum + (machine.metrics?.oee || 0), 0) / filteredMachines.length
-    : 0;
+  // Backend-verified plant OEE for the current machine/date/shift selection - re-derived
+  // server-side from summed seconds/counts across every machine's own buildOeeReportRows() kpis
+  // (see buildPlantSummary() in reportingService.js), never a client-side average of live
+  // per-machine percentages. Falls back to 0 only until the first plant-summary fetch resolves.
+  const averageOee = plantSummary?.kpis?.oee ?? 0;
 
   return (
     <div className="flex min-h-screen bg-[var(--bg-color-page)] font-sans transition-all duration-300">
