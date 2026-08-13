@@ -752,8 +752,30 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
     return res.status(400).json({ error: 'Invalid sync payload' });
   }
 
+  // CRITICAL FIX: this batch used to write status_logs on a bare transaction with only a
+  // "SELECT ... then INSERT if not found" check to avoid duplicates - a classic check-then-act
+  // race. Under InnoDB's default REPEATABLE READ isolation, two overlapping /sync/data calls
+  // for the same machine (a retried upload, or two overlapping gateway sync ticks) each open
+  // their own transaction, each independently see "no matching row yet" (neither can see the
+  // other's still-uncommitted insert), and both insert - producing exact duplicate open
+  // status_logs rows with identical start_time. This is what put 4 identical 'Running' rows
+  // with the same timestamp into the log viewer. Serializing per affected machine through the
+  // same withMachineLock every other status_logs writer uses closes that gap; the lock is
+  // reentrant, so nesting one call per machine here is safe.
+  const machineIds = [...new Set([
+    ...pulses.map((p) => p.machine_id),
+    ...statusLogs.map((l) => l.machine_id)
+  ])];
+
+  const withMachineLocks = (ids, fn) => {
+    if (ids.length === 0) return fn();
+    const [first, ...rest] = ids;
+    return withMachineLock(first, () => withMachineLocks(rest, fn));
+  };
+
   const connection = await db.getConnection();
   try {
+    await withMachineLocks(machineIds, async () => {
     await connection.beginTransaction();
 
     // 1. Process batch pulses
@@ -939,6 +961,7 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
     }
 
     res.json({ success: true, message: `Successfully synced ${pulses.length} pulses and ${statusLogs.length} logs` });
+    });
   } catch (err) {
     await connection.rollback();
     logger.error('Batch Sync Error:', err.message);
