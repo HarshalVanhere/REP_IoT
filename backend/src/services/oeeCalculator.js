@@ -1,6 +1,6 @@
 import db from '../config/db.js';
 import { PREDEFINED_REASONS, PLANNED_REASONS } from '../config/reasonCodes.js';
-import { getShiftForTimestamp, getCurrentShiftStart, getShiftWindow, buildPlantDateTime } from '../config/shifts.js';
+import { getShiftForTimestamp, getCurrentShiftStart, getShiftWindow, buildPlantDateTime, toDateOnlyString } from '../config/shifts.js';
 
 export { PREDEFINED_REASONS };
 
@@ -238,8 +238,18 @@ export function calculateAutoTarget({ planDate, plannedStart, plannedEnd, idealC
  */
 export async function calculateOEE(machineId) {
   const now = new Date();
-  const midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
+  // CRITICAL FIX: this used to be `new Date(); midnight.setHours(0, 0, 0, 0)`, which builds
+  // midnight in the NODE PROCESS's own local timezone (.setHours operates in local time), not
+  // the plant's. On a machine whose local dev TZ happens to already be Asia/Kolkata this is a
+  // silent no-op, which is exactly why it went unnoticed - but a cloud host (Railway, etc.)
+  // commonly runs its OS clock in UTC, which shifts this "midnight" by the full IST offset
+  // (5:30). getPlannedBreaks(midnight) below builds the Tea/Lunch/Dinner windows off this value,
+  // so every break window - and therefore breakSeconds, and therefore downtimeSeconds/
+  // availability on the LIVE dashboard - silently misaligns by 5:30 on such a host, while
+  // reportingService.js's historical reports stay correct because they already build midnight
+  // via the plant-timezone-safe getShiftWindow() helper (see shifts.js's own comment on exactly
+  // this failure mode). Matching that same helper here is what actually fixes it.
+  const midnight = getShiftWindow(toDateOnlyString(now), 'Shift C').start;
   // Shift Elapsed Time resets at every shift change, unlike since-midnight accounting - a
   // machine that hasn't started this shift must show the full shift gap as downtime instead
   // of inheriting Running/Stopped time logged during a previous shift today.
