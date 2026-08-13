@@ -225,7 +225,21 @@ export function startWatchdogService(broadcast) {
     }
   };
 
-  watchdogInterval = setInterval(async () => {
+  // CRITICAL FIX: setInterval fires on a fixed 10s cadence regardless of whether the previous
+  // tick's async body has finished - against a remote DB, a round-trip-heavy tick can still be
+  // in flight when the next one starts. Overlapping ticks racing on the same machine's state
+  // (with no lock between them at some call sites) is what produced duplicate status_logs rows
+  // (see the ensureActiveStatusLog fix below). This guard makes ticks strictly sequential: a
+  // tick that's still running causes the next one to skip outright rather than pile up.
+  let tickInFlight = false;
+
+  watchdogInterval = setInterval(() => {
+    if (tickInFlight) {
+      logger.warn('⏰ Watchdog: previous tick still in flight - skipping this tick to avoid overlap.');
+      return;
+    }
+    tickInFlight = true;
+    (async () => {
     // The part_schedules table (and therefore this auto-advance/no-schedule-block scheduler)
     // is only ever authoritative on the node PPC Engineers actually create schedules on. In a
     // split Edge Gateway + Cloud deployment, that's the Cloud backend - the Edge Gateway has
@@ -291,7 +305,15 @@ export function startWatchdogService(broadcast) {
         // Self-heal the missing log and give this tick a pass instead.
         if (!machine.running_since) {
           logger.warn(`⏰ Watchdog: Machine ${machine.id} is Running with no open status log (resume race) - self-healing, skipping this tick's stale check.`);
-          await ensureActiveStatusLog(machine.id, 'Running', now);
+          // CRITICAL FIX: this call used to run unlocked, unlike every other status_logs writer
+          // in this file. setInterval does not wait for a slow tick to finish before firing the
+          // next one - against a remote DB, a round-trip-heavy tick can easily still be in flight
+          // when the next 10s tick starts. Two overlapping ticks both see the same stuck
+          // "Running with no open log" machine, both reach this self-heal with no lock between
+          // them, and both independently SELECT-then-INSERT a new open Running row - producing
+          // exact duplicate open rows with identical start_time (this is what put 4 identical
+          // 'RUNNING'/'ACTIVE' rows in the log viewer, distinct from the earlier /sync/data race).
+          await withMachineLock(machine.id, () => ensureActiveStatusLog(machine.id, 'Running', now));
           continue;
         }
 
@@ -459,6 +481,7 @@ export function startWatchdogService(broadcast) {
     } catch (err) {
       logger.error('Watchdog Service Error:', err.message);
     }
+    })().finally(() => { tickInFlight = false; });
   }, checkInterval);
 }
 

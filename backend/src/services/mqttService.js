@@ -69,10 +69,17 @@ export function startMQTTBroker(broadcastCallback) {
           payload = { value: payloadStr };
         }
 
+        // Locked per-machine so a device publishing pulse/status messages back-to-back (or two
+        // machines' messages arriving interleaved) can never race the other status_logs writers
+        // (watchdog self-heal, /stop, /resume, sync) for the same machine - matches every other
+        // entry point into handleStatusMessage/handlePulseMessage elsewhere in this codebase.
+        // handleHeartbeatMessage is deliberately NOT included here - it already takes this same
+        // per-machine lock internally, and nesting two withMachineLock calls for the same
+        // machineId would deadlock (the inner call would wait on the outer's own in-flight turn).
         if (messageType === 'pulse') {
-          await handlePulseMessage(machineId, payload);
+          await withMachineLock(machineId, () => handlePulseMessage(machineId, payload));
         } else if (messageType === 'status') {
-          await handleStatusMessage(machineId, payload.status || payload.value);
+          await withMachineLock(machineId, () => handleStatusMessage(machineId, payload.status || payload.value));
         } else if (messageType === 'heartbeat') {
           await handleHeartbeatMessage(machineId);
         }

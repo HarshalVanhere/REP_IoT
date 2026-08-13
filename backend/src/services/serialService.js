@@ -3,6 +3,7 @@ import { ReadlineParser } from '@serialport/parser-readline';
 import db from '../config/db.js';
 import { handlePulseMessage, handleStatusMessage, handleHeartbeatMessage } from './mqttService.js';
 import { logger } from '../utils/logger.js';
+import { withMachineLock } from '../utils/machineLock.js';
 
 let portInstance = null;
 let reconnectTimer = null;
@@ -62,7 +63,7 @@ function connectSerial(portPath, baudRate) {
   portInstance.open(async (err) => {
     if (err) {
       logger.warn(`Serial: Failed to open port ${portPath}: ${err.message}. Retrying in 5 seconds...`);
-      await handleStatusMessage(gatewayMachineId, "Not Connected");
+      await withMachineLock(gatewayMachineId, () => handleStatusMessage(gatewayMachineId, "Not Connected"));
       scheduleReconnect(portPath, baudRate);
       return;
     }
@@ -126,12 +127,15 @@ function connectSerial(portPath, baudRate) {
       if (payload.type === 'pulse') {
         const cycleTime = parseFloat(payload.cycleTime || 15);
         logger.info(`🔩 Serial: Pulse received (cycleTime=${cycleTime}s) - recording production count for ${gatewayMachineId}`);
-        // Direct integration: 1 pulse = 1 production count
-        await handlePulseMessage(gatewayMachineId, { cycleTime, isGood: true });
+        // Direct integration: 1 pulse = 1 production count. Locked per-machine so a burst of
+        // buffered serial lines (the readline parser can emit several 'data' events synchronously
+        // for one buffered chunk) can never race a still-in-flight handler for the same machine -
+        // matches every other entry point into handlePulseMessage/handleStatusMessage.
+        await withMachineLock(gatewayMachineId, () => handlePulseMessage(gatewayMachineId, { cycleTime, isGood: true }));
       } else if (payload.type === 'status') {
         const status = payload.status;
         logger.info(`🔌 Serial: Status telemetry -> "${status}" for ${gatewayMachineId}`);
-        await handleStatusMessage(gatewayMachineId, status);
+        await withMachineLock(gatewayMachineId, () => handleStatusMessage(gatewayMachineId, status));
       } else {
         logger.debug(`🔌 Serial: Received unrecognized telemetry ->`, payload);
       }
@@ -143,7 +147,7 @@ function connectSerial(portPath, baudRate) {
   // Handle port close
   portInstance.on('close', async () => {
     logger.warn(`Serial: Port ${portPath} closed. Attempting reconnect in 5 seconds...`);
-    await handleStatusMessage(gatewayMachineId, "Not Connected");
+    await withMachineLock(gatewayMachineId, () => handleStatusMessage(gatewayMachineId, "Not Connected"));
     scheduleReconnect(portPath, baudRate);
   });
 
