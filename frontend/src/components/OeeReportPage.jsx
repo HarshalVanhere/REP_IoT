@@ -163,27 +163,47 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
     [preset, customStart, customEnd]
   );
 
+  // Whether the selected range's end is today - i.e. whether it can still be actively changing
+  // (an ongoing shift accumulating more Running/Stopped time). A range that ends before today is
+  // a closed, final historical result and never needs to be polled.
+  const includesToday = endDate === toDateStr(new Date());
+
   useEffect(() => {
     if (!machineId || !startDate || !endDate) return undefined;
     let cancelled = false;
-    setLoading(true);
 
     const params = new URLSearchParams({ machineId, startDate, endDate });
     if (shift !== 'All Shifts') params.set('shift', shift);
     if (operator !== 'All Operators') params.set('operator', operator);
     if (partName !== 'All Parts') params.set('partName', partName);
+    const url = `/api/reports/oee-summary?${params.toString()}`;
 
-    apiFetch(`/api/reports/oee-summary?${params.toString()}`, { token: authToken })
-      .then((data) => { if (!cancelled) setReport(data); })
-      .catch((err) => {
-        if (cancelled) return;
-        if (!onAuthError?.(err)) showToast(err.message || 'Failed to load OEE report.', 'error');
-      })
-      .finally(() => { if (!cancelled) setLoading(false); });
+    // CRITICAL FIX: this used to fetch once on mount/filter-change and never again, so a report
+    // scoped to "Today" (or any range ending today) went stale the moment it loaded - Operating
+    // Time/Downtime kept showing whatever the shift's totals were at that instant while the live
+    // machine card (pushed fresh on every WebSocket update) kept moving, making the two drift
+    // further apart the longer the page stayed open. Polling here while `includesToday` keeps
+    // this report converging on the same live totals instead of freezing at first load.
+    const runFetch = (isPoll) => {
+      if (!isPoll) setLoading(true);
+      apiFetch(url, { token: authToken })
+        .then((data) => { if (!cancelled) setReport(data); })
+        .catch((err) => {
+          if (cancelled) return;
+          if (!onAuthError?.(err)) showToast(err.message || 'Failed to load OEE report.', 'error');
+        })
+        .finally(() => { if (!cancelled && !isPoll) setLoading(false); });
+    };
 
-    return () => { cancelled = true; };
+    runFetch(false);
+    const intervalId = includesToday ? setInterval(() => runFetch(true), 45000) : null;
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machineId, startDate, endDate, shift, operator, partName, authToken]);
+  }, [machineId, startDate, endDate, shift, operator, partName, authToken, includesToday]);
 
   useEffect(() => {
     // No `tab` gate here on purpose: fetching only while the Downtime Analysis tab was active
@@ -194,27 +214,37 @@ export default function OeeReportPage({ authToken, machines = [], reasonCodes = 
     // Report effect above.
     if (!machineId || !startDate || !endDate) return undefined;
     let cancelled = false;
-    setDowntimeLoading(true);
 
     const params = new URLSearchParams({ machineId, startDate, endDate, groupBy: downtimeGroupBy });
     if (shift !== 'All Shifts') params.set('shift', shift);
     if (operator !== 'All Operators') params.set('operator', operator);
     if (partName !== 'All Parts') params.set('partName', partName);
+    const url = `/api/reports/downtime-summary?${params.toString()}`;
 
-    apiFetch(`/api/reports/downtime-summary?${params.toString()}`, { token: authToken })
-      .then((data) => { if (!cancelled) setDowntimeReport(data); })
-      .catch((err) => {
-        if (cancelled) return;
-        if (!onAuthError?.(err)) showToast(err.message || 'Failed to load downtime report.', 'error');
-      })
-      .finally(() => { if (!cancelled) setDowntimeLoading(false); });
+    // Same staleness fix as the OEE Report effect above - see that comment.
+    const runFetch = (isPoll) => {
+      if (!isPoll) setDowntimeLoading(true);
+      apiFetch(url, { token: authToken })
+        .then((data) => { if (!cancelled) setDowntimeReport(data); })
+        .catch((err) => {
+          if (cancelled) return;
+          if (!onAuthError?.(err)) showToast(err.message || 'Failed to load downtime report.', 'error');
+        })
+        .finally(() => { if (!cancelled && !isPoll) setDowntimeLoading(false); });
+    };
 
-    return () => { cancelled = true; };
+    runFetch(false);
+    const intervalId = includesToday ? setInterval(() => runFetch(true), 45000) : null;
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
     // `tab` intentionally excluded: the fetch now depends only on the actual query parameters,
     // not on which tab happens to be visible, so switching tabs never itself triggers a redundant
     // re-fetch of data that's already current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machineId, startDate, endDate, shift, operator, partName, downtimeGroupBy, authToken]);
+  }, [machineId, startDate, endDate, shift, operator, partName, downtimeGroupBy, authToken, includesToday]);
 
   const rows = report?.rows || [];
   const kpis = report?.kpis || null;
