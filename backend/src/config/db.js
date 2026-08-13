@@ -197,6 +197,16 @@ const connectionConfig = {
   // of Date objects - avoids UTC-midnight timezone drift when comparing dates as strings.
   // Scoped to DATE only so existing TIMESTAMP columns (last_pulse, start_time, etc.) are unaffected.
   dateStrings: ['DATE'],
+  // CRITICAL FIX: without this, mysql2 converts JS Date <-> TIMESTAMP columns using whatever
+  // timezone the Node process's OS happens to be set to, while the MySQL server session
+  // converts them using its OWN timezone (often UTC on a cloud host). If those two disagree,
+  // every write/read round-trip silently shifts by the difference - this is what produced
+  // status_logs timestamps hours ahead of the plant's live clock (e.g. Aug 13 15:21 shown while
+  // the live clock read 11:45, a ~5:30 gap matching IST). Pinning both sides to UTC (this option
+  // plus the `SET time_zone` on every new connection below) makes every stored instant
+  // unambiguous regardless of server OS config - shifts.js's PLANT_TIMEZONE conversion for
+  // wall-clock display is the only place local time should ever be reconstructed.
+  timezone: 'Z',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -211,6 +221,12 @@ const isProduction = process.env.NODE_ENV === 'production';
 // so re-running it on a later successful reconnect is always safe, not just at first boot.
 async function connectAndSetupRealDatabase() {
   pool = mysql.createPool(connectionConfig);
+  // Belt-and-braces alongside `timezone: 'Z'` above: forces every physical connection's MySQL
+  // SESSION time_zone to UTC too, so a server whose global/system time_zone isn't UTC can't
+  // reintroduce the same double-conversion drift this was meant to fix.
+  pool.on('connection', (connection) => {
+    connection.query("SET time_zone = '+00:00'");
+  });
   const conn = await pool.getConnection();
   console.log('✅ Connected to MySQL successfully.');
   conn.release();

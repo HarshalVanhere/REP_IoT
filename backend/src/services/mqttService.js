@@ -103,6 +103,12 @@ export function publishMQTT(topic, payload) {
  * Handles pulse messages from machines
  */
 export async function handlePulseMessage(machineId, payload) {
+  // Self-locking (see handleStatusMessage) - a pulse can self-heal status to 'Running' below,
+  // which must never interleave with a concurrent status transition for the same machine.
+  return withMachineLock(machineId, () => handlePulseMessageLocked(machineId, payload));
+}
+
+async function handlePulseMessageLocked(machineId, payload) {
   const cycleTime = parseFloat(payload.cycleTime || 10);
   const isGood = payload.isGood !== undefined ? payload.isGood : true;
   const timestamp = new Date();
@@ -205,49 +211,64 @@ export async function handleStatusMessage(machineId, status) {
     return;
   }
 
-  const timestamp = new Date();
-  timestamp.setMilliseconds(0);
+  // Self-locking: this is the single choke-point every status transition (MQTT publish, the
+  // watchdog, sync, every route) funnels through, so acquiring the per-machine lock here - not
+  // just at some call sites - guarantees two transitions for the same machine can never
+  // interleave and leave more than one open status_logs row behind. withMachineLock is
+  // reentrant, so callers that already hold this machineId's lock (e.g. POST /stop) are
+  // unaffected.
+  await withMachineLock(machineId, async () => {
+    const timestamp = new Date();
+    timestamp.setMilliseconds(0);
 
-  // 1. Fetch current status of machine to check for transition
-  const [machines] = await db.query('SELECT status FROM machines WHERE id = ?', [machineId]);
-  if (machines.length === 0) return;
+    // 1. Fetch current status of machine to check for transition
+    const [machines] = await db.query('SELECT status FROM machines WHERE id = ?', [machineId]);
+    if (machines.length === 0) return;
 
-  const currentStatus = machines[0].status;
-  if (currentStatus !== status) {
-    // 2. Update machine status in database
-    await db.query('UPDATE machines SET status = ? WHERE id = ?', [status, machineId]);
+    const currentStatus = machines[0].status;
+    if (currentStatus !== status) {
+      // 2. Update machine status in database
+      await db.query('UPDATE machines SET status = ? WHERE id = ?', [status, machineId]);
 
-    // Stopping the machine - whether the operator pressed Stop on the touchscreen, or the
-    // watchdog auto-stopped it after no pulse for ideal_cycle_time + 2min - must not leave a
-    // stale "last cycle time" on display from before this stop. Both paths funnel through here,
-    // so this is the single choke-point for the reset (see calculateOEE() for the read side).
-    if (status === 'Stopped') {
-      await db.query('UPDATE machines SET last_cycle_reset_at = ? WHERE id = ?', [timestamp, machineId]);
+      // Stopping the machine - whether the operator pressed Stop on the touchscreen, or the
+      // watchdog auto-stopped it after no pulse for ideal_cycle_time + 2min - must not leave a
+      // stale "last cycle time" on display from before this stop. Both paths funnel through here,
+      // so this is the single choke-point for the reset (see calculateOEE() for the read side).
+      if (status === 'Stopped') {
+        await db.query('UPDATE machines SET last_cycle_reset_at = ? WHERE id = ?', [timestamp, machineId]);
+      }
+
+      // 3. Transition status logs
+      await ensureActiveStatusLog(machineId, status, timestamp);
+      logger.info(`🔌 Machine ${machineId} transitioned: ${currentStatus} ➡️ ${status}`);
     }
 
-    // 3. Transition status logs
-    await ensureActiveStatusLog(machineId, status, timestamp);
-    logger.info(`🔌 Machine ${machineId} transitioned: ${currentStatus} ➡️ ${status}`);
-  }
+    // 4. Recalculate OEE
+    const oeeMetrics = await calculateOEE(machineId);
 
-  // 4. Recalculate OEE
-  const oeeMetrics = await calculateOEE(machineId);
-
-  // 5. Broadcast update to frontend clients
-  if (wsBroadcastCallback) {
-    wsBroadcastCallback({
-      type: 'STATUS_CHANGE',
-      machineId,
-      status,
-      metrics: oeeMetrics
-    });
-  }
+    // 5. Broadcast update to frontend clients
+    if (wsBroadcastCallback) {
+      wsBroadcastCallback({
+        type: 'STATUS_CHANGE',
+        machineId,
+        status,
+        metrics: oeeMetrics
+      });
+    }
+  });
 }
 
 /**
  * Handles resuming production with a downtime reason and operator tracking
  */
 export async function handleResumeMessage(machineId, reason, operatorId = null) {
+  // Self-locking (see handleStatusMessage) - resume races against the ESP32's own immediate
+  // status telemetry are exactly what produced duplicate open status_logs rows historically;
+  // reentrant so callers like POST /resume that already hold this machineId's lock are unaffected.
+  return withMachineLock(machineId, () => handleResumeMessageLocked(machineId, reason, operatorId));
+}
+
+async function handleResumeMessageLocked(machineId, reason, operatorId) {
   const timestamp = new Date();
   timestamp.setMilliseconds(0);
 
@@ -256,7 +277,7 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
   if (machines.length === 0) return;
 
   const currentStatus = machines[0].status;
-  
+
   // 2. Update machine status in database
   await db.query("UPDATE machines SET status = 'Running' WHERE id = ?", [machineId]);
 
@@ -339,6 +360,15 @@ export async function handleResumeMessage(machineId, reason, operatorId = null) 
  * Closes out any older open status log and opens a new one if status changes.
  */
 export async function ensureActiveStatusLog(machineId, targetStatus, timestamp) {
+  // Self-locking (see handleStatusMessage) - this is the function that actually opens/closes
+  // status_logs rows, and it used to be called directly (unlocked) from the watchdog's
+  // resume-race self-heal, racing the MQTT publish handler's own unlocked call chain. That gap
+  // is exactly what could leave two open rows for one machine, which then both got closed to
+  // the same timestamp and showed up as duplicate 0s-duration log rows.
+  return withMachineLock(machineId, () => ensureActiveStatusLogLocked(machineId, targetStatus, timestamp));
+}
+
+async function ensureActiveStatusLogLocked(machineId, targetStatus, timestamp) {
   if (timestamp) timestamp.setMilliseconds(0);
   // Check if there's already an active log with this status
   const [activeLogs] = await db.query(
