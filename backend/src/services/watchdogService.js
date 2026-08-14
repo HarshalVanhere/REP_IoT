@@ -1,4 +1,4 @@
-import db from '../config/db.js';
+import db, { correctImplausibleRunningRows } from '../config/db.js';
 import { handleStatusMessage, ensureActiveStatusLog } from './mqttService.js';
 import { sendSerialCommand } from './serialService.js';
 import { resetProductionCounters } from './productionRecordService.js';
@@ -203,6 +203,15 @@ let watchdogInterval = null;
 const ALERT_COOLDOWN_MS = 15 * 60 * 1000;
 const lastAlertedAt = new Map(); // `${machineId}:${alertType}` -> timestamp
 
+// Throttle for correctImplausibleRunningRows (see db.js) - a real data-integrity check (implausibly
+// long 'Running' rows with zero corroborating pulses), but re-scanning even a "recent only" window
+// against a remote DB every 10s is unnecessary load for something that only needs to be caught
+// within minutes, not seconds. Runs independently of the Edge/Cloud tier split below - correcting
+// an already-CLOSED row's recorded duration is pure data hygiene, not a live "stop the machine"
+// decision, so it carries none of the stop-authority concerns that gate the cycle-timeout check.
+const IMPLAUSIBLE_CORRECTION_INTERVAL_MS = 5 * 60 * 1000;
+let lastImplausibleCorrectionAt = 0;
+
 function shouldEmitAlert(key) {
   const last = lastAlertedAt.get(key);
   const now = Date.now();
@@ -264,6 +273,23 @@ export function startWatchdogService(broadcast) {
     }
 
     try {
+      // Catches a NEW implausible-Running row (any cause, not just the duplicate-insert race
+      // this was first found from) within minutes of it closing, instead of leaving it to
+      // silently corrupt every downtime/OEE report until the next server restart re-runs the
+      // boot-time sweep. Scoped to recently-closed rows only - see db.js's sinceEnd param.
+      if (Date.now() - lastImplausibleCorrectionAt >= IMPLAUSIBLE_CORRECTION_INTERVAL_MS) {
+        lastImplausibleCorrectionAt = Date.now();
+        const sinceEnd = new Date(Date.now() - IMPLAUSIBLE_CORRECTION_INTERVAL_MS - 60000);
+        const correctedCount = await correctImplausibleRunningRows(sinceEnd);
+        if (correctedCount > 0) {
+          logger.warn(`⏰ Watchdog: Corrected ${correctedCount} implausible zero-pulse "Running" status_logs row(s).`);
+        }
+      }
+    } catch (err) {
+      logger.error('Watchdog Service Error (implausible-Running correction):', err.message);
+    }
+
+    try {
       // A machine with iot_enabled = FALSE has no ESP32/Raspberry Pi wired up at all - it will
       // never produce a real pulse or status message, so nothing else in this codebase will ever
       // move it off whatever status it's stuck at. Force it to "Not Connected" on every tick
@@ -315,6 +341,41 @@ export function startWatchdogService(broadcast) {
           // 'RUNNING'/'ACTIVE' rows in the log viewer, distinct from the earlier /sync/data race).
           await withMachineLock(machine.id, () => ensureActiveStatusLog(machine.id, 'Running', now));
           continue;
+        }
+
+        // Visibility safety net for the STILL-OPEN case (the closed-row correction above can
+        // only fix a row after it ends): a machine that's been Running for far longer than it
+        // could plausibly go between cycles, with ZERO pulses since, is likely stuck/misreported
+        // right now - worth surfacing immediately rather than waiting for someone to notice via a
+        // report days later. Deliberately alert-only, never force-stops the machine on either
+        // tier - same stop-authority boundary the Edge-Gateway-only cycle-timeout check below
+        // respects; this only ever reports what the data already shows.
+        try {
+          const idealTimeForCheck = machine.ideal_cycle_time || 15;
+          const implausibleThresholdSeconds = Math.max(1800, 3 * (idealTimeForCheck + 120));
+          const secondsRunning = (now.getTime() - new Date(machine.running_since).getTime()) / 1000;
+
+          if (secondsRunning > implausibleThresholdSeconds) {
+            const [[{ pulseCount }]] = await db.query(
+              'SELECT COUNT(*) as pulseCount FROM pulses WHERE machine_id = ? AND timestamp >= ?',
+              [machine.id, machine.running_since]
+            );
+            // shouldEmitAlert only called (and its cooldown only consumed) once we know there's
+            // actually something to alert on - otherwise a plausible pulse-backed Running period
+            // that merely crossed the duration threshold would burn the cooldown window and
+            // suppress a real future alert for this machine.
+            if (pulseCount === 0 && shouldEmitAlert(`${machine.id}:implausible-running`)) {
+              logger.warn(`⏰ Watchdog: Machine ${machine.id} ("${machine.name}") has shown Running for ${Math.round(secondsRunning)}s with ZERO pulses - likely stuck/misreported status, not real production.`);
+              emitAlert({
+                severity: 'warning',
+                machineId: machine.id,
+                machineName: machine.name,
+                message: `${machine.name} has shown Running for ${Math.round(secondsRunning / 60)} min with no production - check the machine/connection`
+              });
+            }
+          }
+        } catch (err) {
+          logger.error(`Watchdog Service Error (implausible-Running visibility check, machine ${machine.id}):`, err.message);
         }
 
         // Threshold is the machine's own configured heartbeat timeout (Admin-editable per

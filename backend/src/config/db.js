@@ -587,6 +587,92 @@ async function connectAndSetupRealDatabase() {
         console.warn('⚠️  status_logs unique-open-row constraint not applied:', err.message);
       }
     }
+
+    // PERMANENT FIX: see correctImplausibleRunningRows() below for the full rationale. Bounded to
+    // the last 60 days (not the whole table) so boot time stays roughly constant as status_logs
+    // grows over months/years of 24x7 operation, instead of this N+1 pulse-count sweep getting
+    // slower every deploy - reports realistically only ever get pulled for recent history anyway.
+    // watchdogService.js additionally calls the same function periodically with a recent-only
+    // cutoff so a NEW occurrence (from any cause, not just the duplicate-insert race this was
+    // first found from) gets corrected within minutes instead of sitting wrong until the next
+    // restart.
+    try {
+      const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 3600000);
+      const correctedCount = await correctImplausibleRunningRows(sixtyDaysAgo);
+      if (correctedCount > 0) {
+        console.log(`   + Corrected ${correctedCount} implausible zero-pulse "Running" status_logs row(s)`);
+      }
+    } catch (err) {
+      console.warn('⚠️  Implausible-Running cleanup skipped:', err.message);
+    }
+}
+
+/**
+ * Finds and corrects 'Running' status_logs rows whose ENTIRE duration has zero corroborating
+ * pulses, spanning far longer than the machine could plausibly go between cycles - not real
+ * Operating Time, but corrupted data. First confirmed in production: the historical duplicate-
+ * insert race (see the cleanup in connectAndSetupRealDatabase above) could leave a "surviving"
+ * row open with no way to know if the machine was genuinely producing, later closed out by an
+ * unrelated future event - producing a multi-hour "Running" span with 0 pulses inside it.
+ * Downtime/OEE reports trust status_logs as ground truth (by design - see computeShiftDowntime),
+ * so a row like this silently reports near-zero downtime for a shift where nothing was actually
+ * produced - exactly what a domain user spotted (Shift C showing ~24 minutes of downtime with 0
+ * production the whole shift). The threshold (3x the machine's own idealTime+120s cycle-timeout
+ * window, floored at 30 minutes) is deliberately generous - verified against real production data
+ * to flag only genuinely implausible spans, never a legitimately slow but real production run
+ * (which always has SOME pulses inside it).
+ *
+ * Exported so both the one-off, unbounded boot-time sweep above AND watchdogService's periodic,
+ * recent-only tick run the exact same detection/correction logic - one implementation, not two
+ * that could drift apart.
+ *
+ * @param {Date} [sinceEnd] - only consider rows whose end_time is on/after this instant. Omitted
+ *   for a truly unbounded sweep; both callers in this codebase pass a bound (60 days at boot, a
+ *   few minutes for the periodic watchdog tick) to keep this fast against a remote DB.
+ */
+export async function correctImplausibleRunningRows(sinceEnd = null) {
+  if (isMock || !pool) return 0;
+
+  const params = [];
+  let sinceClause = '';
+  if (sinceEnd) {
+    sinceClause = 'AND sl.end_time >= ?';
+    params.push(sinceEnd);
+  }
+
+  // Pulse count computed via a correlated subquery in the SAME query, not a separate round-trip
+  // per candidate row - against a remote DB (100-500ms/round-trip), an N+1 loop here made boot
+  // take 30-45s+ once a machine accumulated a normal season's worth of long (legitimate) Running
+  // rows. MySQL evaluates the subquery server-side per row, which is orders of magnitude cheaper
+  // than one full network round-trip per row from Node.
+  const [suspectRows] = await pool.query(`
+    SELECT sl.id, sl.machine_id, sl.start_time, sl.end_time,
+      (SELECT COUNT(*) FROM pulses p
+       WHERE p.machine_id = sl.machine_id AND p.timestamp >= sl.start_time AND p.timestamp < sl.end_time
+      ) AS pulseCount
+    FROM status_logs sl
+    JOIN machines m ON m.id = sl.machine_id
+    WHERE sl.status = 'Running'
+      AND sl.end_time IS NOT NULL
+      AND TIMESTAMPDIFF(SECOND, sl.start_time, sl.end_time) > GREATEST(1800, 3 * (m.ideal_cycle_time + 120))
+      ${sinceClause}
+    HAVING pulseCount = 0
+  `, params);
+
+  let correctedCount = 0;
+  for (const row of suspectRows) {
+    // Collapse to a zero-duration artifact (same resolution the duplicate-insert cleanup above
+    // already applies to its non-surviving rows) - resolveStatusIntervals's gap-filling then
+    // correctly reclassifies the vacated span as real downtime instead of fabricated Operating
+    // Time. synced=FALSE so any Edge Gateway/Cloud mirror that already uploaded the old (wrong)
+    // duration re-syncs the correction.
+    await pool.query(
+      'UPDATE status_logs SET end_time = start_time, synced = FALSE WHERE id = ?',
+      [row.id]
+    );
+    correctedCount++;
+  }
+  return correctedCount;
 }
 
 // Background self-healing loop for the case where `connectAndSetupRealDatabase()` fails at
