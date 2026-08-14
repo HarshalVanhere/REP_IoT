@@ -89,6 +89,15 @@ export function resolveStatusIntervals(logs, windowStart, windowEnd) {
   for (const log of logs) {
     const start = new Date(log.start_time).getTime();
     const end = log.end_time ? new Date(log.end_time).getTime() : Infinity;
+    // A stored end_time at or before its own start_time is corrupt data (a historical race/bug
+    // artifact, confirmed in production: a handful of rows with end_time minutes BEFORE
+    // start_time). Such a row has no valid duration and must be excluded entirely - not just from
+    // contributing an interval (already handled by the end>start filter below) but from
+    // `distinctStarts` too. Left in, its mere start_time could still poison nextDistinctStart's
+    // truncation of a genuinely earlier, legitimate row - e.g. silently deleting an open Running
+    // interval that should have carried into this shift, because a corrupt row's start_time
+    // looked like "the next real transition" even though the row itself is garbage.
+    if (log.end_time && end <= start) continue;
     const key = `${start}|${log.status}`;
     const existing = deduped.get(key);
     // Keep the row with the LATEST effective end (Infinity/still-open wins) - a duplicate that
@@ -117,7 +126,7 @@ export function resolveStatusIntervals(logs, windowStart, windowEnd) {
     return best;
   };
 
-  return originals
+  const truncated = originals
     .map((l) => ({
       id: l.id,
       start: Math.max(l.start, winStart),
@@ -128,73 +137,239 @@ export function resolveStatusIntervals(logs, windowStart, windowEnd) {
       partName: l.partName
     }))
     .filter((l) => l.end > l.start);
+
+  // Two rows spanning the EXACT same (start, end) with DIFFERENT non-Running statuses (real
+  // production data: a race that logged the same disconnect as both 'Stopped' AND 'Not
+  // Connected') are the same real-world outage described twice, not two independent concurrent
+  // downtime periods - counting both in full double-counts that wall-clock time. Collapse any
+  // such exact-span group down to a single interval, preferring 'Stopped' (carries an operator
+  // reason, the more specific classification) over 'Not Connected'. A genuine companion pair with
+  // staggered (non-identical) start/end is untouched - only a fully coincident span collapses.
+  const bySpan = new Map();
+  truncated.forEach((iv) => {
+    const key = `${iv.start}-${iv.end}`;
+    if (!bySpan.has(key)) bySpan.set(key, []);
+    bySpan.get(key).push(iv);
+  });
+
+  const result = [];
+  bySpan.forEach((group) => {
+    if (group.length === 1) {
+      result.push(group[0]);
+      return;
+    }
+    const running = group.find((iv) => iv.status === 'Running');
+    if (running) {
+      result.push(running);
+      return;
+    }
+    const stopped = group.find((iv) => iv.status === 'Stopped');
+    result.push(stopped || group[0]);
+  });
+
+  return result.sort((a, b) => a.start - b.start);
 }
 
 /**
- * Clips a resolved status timeline to [windowStart, windowEnd], subtracts any overlap with the
- * given planned breaks, and buckets the remaining duration into Running/Stopped/Not Connected
- * totals (plus downtime-by-reason). Shared by the live "since midnight" calculation below and
- * reportingService.js's arbitrary historical windows, so the two can never compute utilization
- * differently.
+ * Fills every uncovered gap in a resolved (non-overlapping) interval list so the returned
+ * timeline covers [windowStart, windowEnd) with ZERO holes. status_logs can have genuine holes -
+ * a machine that was iot_enabled mid-shift with no prior row, a historical logging gap, a period
+ * that simply never got a status_logs row at all - and summing only the rows that exist silently
+ * drops that time from every total (Running/Downtime both), which is exactly the "lost minutes"
+ * bug this closes. Gaps are inserted as synthetic Stopped intervals (id: null, reason: null,
+ * synthetic: true) - unclassified wall-clock time is downtime by definition (it is provably not
+ * Running), and computeShiftDowntime below assigns it a concrete reason.
  */
-export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
+function fillTimelineGaps(resolved, windowStart, windowEnd) {
+  const winStart = windowStart.getTime();
+  const winEnd = windowEnd.getTime();
+  if (winEnd <= winStart) return [];
+
+  const timeline = [];
+  let cursor = winStart;
+  for (const iv of resolved) {
+    if (iv.start > cursor) {
+      timeline.push({ id: null, start: cursor, end: iv.start, status: 'Stopped', reason: null, operator: null, partName: null, synthetic: true });
+    }
+    timeline.push(iv);
+    cursor = Math.max(cursor, iv.end);
+  }
+  if (cursor < winEnd) {
+    timeline.push({ id: null, start: cursor, end: winEnd, status: 'Stopped', reason: null, operator: null, partName: null, synthetic: true });
+  }
+  return timeline;
+}
+
+/**
+ * THE single per-minute classified timeline for one [windowStart, windowEnd) window - every
+ * caller that needs to reason about status minute-by-minute (computeShiftDowntime's totals below,
+ * AND reportingService.js's buildHourlyBreakdown slicing that same shift into hour buckets) reads
+ * off this SAME classified timeline, never re-derives their own. Covers [windowStart, windowEnd)
+ * with zero gaps and zero overlaps (resolveStatusIntervals + fillTimelineGaps), and every non-
+ * Running interval already carries its final reason - see computeShiftDowntime's docblock below
+ * for the exact classification rules (whole-window-never-ran, pre-first-run gaps, Not Connected,
+ * specific reasons preserved). Running intervals carry reason/category: null - not applicable.
+ */
+export function buildClassifiedTimeline(logs, windowStart, windowEnd) {
+  const winStart = windowStart.getTime();
+  const winEnd = windowEnd.getTime();
+  if (winEnd <= winStart) return [];
+
   const resolved = resolveStatusIntervals(logs, windowStart, windowEnd);
+  const timeline = fillTimelineGaps(resolved, windowStart, windowEnd);
+
+  const firstRunningStart = timeline
+    .filter((iv) => iv.status === 'Running')
+    .reduce((min, iv) => (min === null || iv.start < min ? iv.start : min), null);
+  const everRan = firstRunningStart !== null;
+
+  return timeline
+    .map((iv) => {
+      const durationSeconds = Math.max(0, (iv.end - iv.start) / 1000);
+      if (durationSeconds <= 0) return null;
+
+      if (iv.status === 'Running') {
+        return {
+          id: iv.id,
+          start: new Date(iv.start),
+          end: new Date(iv.end),
+          status: 'Running',
+          reason: null,
+          category: null,
+          durationSeconds,
+          operator: iv.operator,
+          partName: iv.partName,
+          synthetic: !!iv.synthetic
+        };
+      }
+
+      let reason;
+      if (!everRan) {
+        // Nothing ran anywhere in this window - the whole thing is an unstarted shift, full stop.
+        reason = 'No Shift Started';
+      } else {
+        const beforeFirstRun = iv.end <= firstRunningStart;
+        reason = iv.reason;
+        if (!reason) {
+          reason = beforeFirstRun
+            ? 'No Shift Started'
+            : (iv.status === 'Not Connected' ? 'No Signal' : 'Other');
+        } else if (reason === 'Shift Start' && beforeFirstRun) {
+          reason = 'No Shift Started';
+        }
+      }
+
+      return {
+        id: iv.id,
+        start: new Date(iv.start),
+        end: new Date(iv.end),
+        status: iv.status,
+        reason,
+        category: PLANNED_REASONS.has(reason) ? 'Planned' : 'Unplanned',
+        durationSeconds,
+        operator: iv.operator,
+        partName: iv.partName,
+        synthetic: !!iv.synthetic
+      };
+    })
+    .filter(Boolean);
+}
+
+/**
+ * THE single source of truth for downtime TOTALS, for exactly one [windowStart, windowEnd) window
+ * (one shift, or any other bounded period) - a thin aggregation over buildClassifiedTimeline
+ * above. Both aggregateStatusLogs below (live dashboard + the OEE Report's per-shift totals) and
+ * reportingService.js's buildDowntimeReport (Downtime Analysis' event list) call this same
+ * function for the same window, so the two can never disagree about Total Downtime - there is no
+ * second, parallel implementation of this math anywhere else.
+ *
+ * Guarantees, by construction:
+ *   - Every minute of [windowStart, windowEnd) is accounted for exactly once: resolveStatusIntervals
+ *     removes overlaps, fillTimelineGaps removes holes, so runningSeconds + totalDowntimeSeconds
+ *     always equals the window's full duration - Total Shift Time = Operating Time + Total
+ *     Downtime holds as an identity, not an approximation.
+ *   - Every non-Running interval (Stopped, Not Connected, or an unlogged gap) gets a concrete
+ *     reason - never left blank, never silently dropped from the reasons breakdown.
+ *   - A window with zero Running activity anywhere in it - the machine never started this shift -
+ *     has its ENTIRE downtime classified as 'No Shift Started', regardless of whatever specific
+ *     reason (if any) individual rows happen to carry, matching that concept literally: nothing
+ *     ran, so there is nothing else meaningful to attribute the time to.
+ *   - Otherwise, only the time BEFORE the shift's first real Running interval is eligible for
+ *     'No Shift Started' (a late start), and only when it carries no more specific reason already
+ *     (an operator-logged reason for the delay, e.g. 'Material Shortage', is left untouched -
+ *     losing real diagnostic input would violate "do not hide/discard downtime duration" too).
+ *   - Scheduled-break overlap is NEVER subtracted from a downtime interval's counted duration
+ *     (the previous behavior did this for non-break reasons) - doing so silently erased real
+ *     downtime minutes from the reasons breakdown and Total Downtime. breakSeconds is still
+ *     computed and returned, but only for Planned Production Time (Availability's denominator),
+ *     a separate, deliberately break-excluded figure this function does not otherwise use.
+ *
+ * IMPORTANT: classification (e.g. 'No Shift Started') is scoped to whatever window YOU pass in -
+ * always call this with the FULL shift window, never a sub-slice of it (e.g. one hour), or a
+ * mid-shift downtime blip in that one hour will be wrongly read as "the shift never started".
+ * buildHourlyBreakdown avoids this by classifying the whole shift once via buildClassifiedTimeline
+ * and slicing the already-classified result into hours, rather than calling this per hour.
+ */
+export function computeShiftDowntime(logs, windowStart, windowEnd, breaks) {
+  if (windowEnd.getTime() <= windowStart.getTime()) {
+    return { runningSeconds: 0, totalDowntimeSeconds: 0, downtimeReasons: {}, downtimeEvents: [], breakSeconds: 0 };
+  }
+
+  const timeline = buildClassifiedTimeline(logs, windowStart, windowEnd);
 
   let runningSeconds = 0;
+  let totalDowntimeSeconds = 0;
+  const downtimeReasons = {};
+  const downtimeEvents = [];
+
+  timeline.forEach((iv) => {
+    if (iv.status === 'Running') {
+      runningSeconds += iv.durationSeconds;
+      return;
+    }
+    totalDowntimeSeconds += iv.durationSeconds;
+    downtimeReasons[iv.reason] = (downtimeReasons[iv.reason] || 0) + iv.durationSeconds;
+    downtimeEvents.push(iv);
+  });
+
+  // Planned Production Time's break exclusion is a SEPARATE concept from downtime accounting
+  // above - credited once per unique (start, end) span (including gap-filled ones) so a
+  // 'Stopped' + 'Not Connected' companion pair covering the same disconnect doesn't subtract the
+  // same break minute twice.
+  const uniqueSpans = new Map();
+  timeline.forEach((iv) => uniqueSpans.set(`${iv.start.getTime()}-${iv.end.getTime()}`, iv));
+  let breakSeconds = 0;
+  uniqueSpans.forEach((iv) => {
+    breaks.forEach((b) => {
+      breakSeconds += getIntervalOverlapSeconds(iv.start, iv.end, b.start, b.end);
+    });
+  });
+
+  return { runningSeconds, totalDowntimeSeconds, downtimeReasons, downtimeEvents, breakSeconds };
+}
+
+/**
+ * Legacy-shaped wrapper around computeShiftDowntime, preserving the {runningSeconds,
+ * stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons} contract every existing caller
+ * (the live "since shift start" dashboard, reportingService.js's OEE Report, the Analytics
+ * hourly-trend chart) already depends on, plus the new totalDowntimeSeconds field. Not Connected
+ * time and gap-filled time both used to be invisible to "downtime" (only 'Stopped' rows counted) -
+ * they're now folded into stoppedSeconds/totalDowntimeSeconds too (noSignalSeconds is still
+ * broken out separately for callers that render a distinct "No Signal" utilization bar), since a
+ * machine that's disconnected or has an unlogged gap is not producing either way.
+ */
+export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
+  const { runningSeconds, totalDowntimeSeconds, downtimeReasons, downtimeEvents, breakSeconds } =
+    computeShiftDowntime(logs, windowStart, windowEnd, breaks);
+
   let stoppedSeconds = 0;
   let noSignalSeconds = 0;
-
-  const downtimeReasons = { Other: 0 };
-  PREDEFINED_REASONS.forEach(r => downtimeReasons[r] = 0);
-
-  resolved.forEach((iv) => {
-    const ivStart = new Date(iv.start);
-    const ivEnd = new Date(iv.end);
-    let overlapSeconds = 0;
-    breaks.forEach(b => {
-      overlapSeconds += getIntervalOverlapSeconds(ivStart, ivEnd, b.start, b.end);
-    });
-    const rawDurationSeconds = Math.max(0, (iv.end - iv.start) / 1000);
-    const durationSeconds = Math.max(0, rawDurationSeconds - overlapSeconds);
-
-    if (iv.status === 'Running') {
-      runningSeconds += durationSeconds;
-    } else if (iv.status === 'Stopped') {
-      const reason = iv.reason || 'Other';
-      const bucketReason = downtimeReasons[reason] !== undefined ? reason : 'Other';
-      // Planned-break reasons (Tea/Lunch/PM) count their FULL observed duration, not reduced
-      // by overlap with the plant's fixed break schedule - an operator's actual break rarely
-      // lines up to the minute with the schedule (left a bit early, back a bit late), and that
-      // whole span legitimately IS the break, not generic downtime that happens to coincide
-      // with one. Every other reason still excludes break overlap, matching how Planned
-      // Production Time itself excludes breaks. stoppedSeconds is accumulated from this SAME
-      // per-reason value (never computed independently) so "Total Stop Time" can never drift
-      // from the sum of the Downtime Reasons Breakdown.
-      const stoppedDurationSeconds = PLANNED_REASONS.has(bucketReason) ? rawDurationSeconds : durationSeconds;
-      stoppedSeconds += stoppedDurationSeconds;
-      downtimeReasons[bucketReason] += stoppedDurationSeconds;
-    } else if (iv.status === 'Not Connected') {
-      noSignalSeconds += durationSeconds;
-    }
+  downtimeEvents.forEach((e) => {
+    if (e.status === 'Not Connected') noSignalSeconds += e.durationSeconds;
+    else stoppedSeconds += e.durationSeconds;
   });
 
-  // Break time is credited once per unique resolved (start, end) interval, not once per row that
-  // shares it - a 'Stopped' + 'Not Connected' companion pair covering the same disconnect must
-  // not subtract the same break minute from Planned Production Time twice.
-  const uniqueIntervals = new Map();
-  resolved.forEach((iv) => {
-    uniqueIntervals.set(`${iv.start}-${iv.end}`, iv);
-  });
-  let breakSeconds = 0;
-  uniqueIntervals.forEach((iv) => {
-    const ivStart = new Date(iv.start);
-    const ivEnd = new Date(iv.end);
-    breaks.forEach(b => {
-      breakSeconds += getIntervalOverlapSeconds(ivStart, ivEnd, b.start, b.end);
-    });
-  });
-
-  return { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons };
+  return { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons, totalDowntimeSeconds };
 }
 
 /**
@@ -392,22 +567,20 @@ export async function calculateOEE(machineId) {
     // other way around. That's what prevents an unlogged gap (machine never started) from
     // silently being counted as productive time.
     const todayBreaks = getPlannedBreaks(midnight);
-    const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons } =
+    const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons, totalDowntimeSeconds } =
       aggregateStatusLogs(logs, shiftStart, now, todayBreaks);
 
     // Shift Elapsed Time = now - shift start (raw, includes planned breaks)
     const shiftElapsedSeconds = Math.max(0, (now.getTime() - shiftStart.getTime()) / 1000);
-    // Planned Production Time = Shift Elapsed - Planned Break Elapsed
+    // Planned Production Time = Shift Elapsed - Planned Break Elapsed. Used ONLY as Availability's
+    // denominator below - Total Downtime (totalDowntimeSeconds, from aggregateStatusLogs) is a
+    // separate, gap-filled figure covering the FULL shift-elapsed time, matching the Downtime
+    // Analysis/OEE Report definition: Total Shift Time = Operating Time + Total Downtime.
     const plannedSeconds = Math.max(1, shiftElapsedSeconds - breakSeconds);
 
     const runningPct = Math.max(0, Math.min(100, (runningSeconds / plannedSeconds) * 100));
     const stoppedPct = Math.max(0, Math.min(100, (stoppedSeconds / plannedSeconds) * 100));
     const noSignalPct = Math.max(0, Math.min(100, (noSignalSeconds / plannedSeconds) * 100));
-
-    // Downtime = Shift Elapsed - Running Time - Planned Break Elapsed (i.e. Planned Time - Running).
-    // If the machine has never entered RUNNING, runningSeconds is 0 and the entire elapsed shift
-    // becomes downtime, as it should.
-    const totalDowntimeSeconds = Math.max(0, plannedSeconds - runningSeconds);
 
     // Machine Utilization = Running Time / Shift Elapsed Time (0 if the shift has no elapsed time
     // yet). Deliberately uses raw Shift Elapsed, not Planned Production Time - see Availability

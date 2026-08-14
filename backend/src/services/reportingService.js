@@ -1,7 +1,7 @@
 import db from '../config/db.js';
+import { logger } from '../utils/logger.js';
 import { SHIFT_NAMES, getShiftWindow, buildPlantDateTime, formatPlantTime } from '../config/shifts.js';
-import { getPlannedBreaks, aggregateStatusLogs, resolveStatusIntervals, computeOeeFromTotals, getIntervalOverlapSeconds, calculateAutoTarget } from './oeeCalculator.js';
-import { PLANNED_REASONS } from '../config/reasonCodes.js';
+import { getPlannedBreaks, aggregateStatusLogs, resolveStatusIntervals, computeShiftDowntime, buildClassifiedTimeline, computeOeeFromTotals, getIntervalOverlapSeconds, calculateAutoTarget } from './oeeCalculator.js';
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10;
 
@@ -185,25 +185,31 @@ export async function computeWindowMetrics(machineId, dateStr, windowStart, wind
   const midnight = getShiftWindow(dateStr, 'Shift C').start;
   const breaks = getPlannedBreaks(midnight);
 
-  const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons } =
+  const { runningSeconds, stoppedSeconds, noSignalSeconds, breakSeconds, downtimeReasons, totalDowntimeSeconds } =
     aggregateStatusLogs(allStatusLogs, windowStart, clippedEnd, breaks);
 
   const totalWindowSeconds = Math.max(0, (clippedEnd.getTime() - windowStart.getTime()) / 1000);
   const plannedSeconds = Math.max(1, totalWindowSeconds - breakSeconds);
 
-  // Total Downtime = stoppedSeconds, the SAME timestamp-based, break-exclusion-adjusted sum of
-  // 'Stopped' status_logs intervals that buildDowntimeReport (Downtime Analysis) computes for
-  // this exact window - both are now built from resolveStatusIntervals' overlap-safe timeline, so
-  // the two reports' Total Downtime figures can never drift apart (see buildDowntimeReport below
-  // for the matching logic, including 'Shift Start'/'Shift not started' handling).
+  // Total Downtime comes straight from computeShiftDowntime (via aggregateStatusLogs) - the SAME
+  // gap-filled, overlap-safe, timestamp-based computation buildDowntimeReport (Downtime Analysis)
+  // calls for this exact window, so the two reports' Total Downtime can never drift apart. Every
+  // minute of the window is either Running or counted here (Stopped, Not Connected, or an
+  // unlogged gap all count in full) - nothing is silently dropped.
   //
   // Operating Time = Total Shift Time - Total Downtime. Deliberately NOT Planned Production Time
-  // (plannedSeconds, which already excludes breaks) minus downtime - that would double-subtract
-  // break time that's already excluded from plannedSeconds AND folded into totalDowntimeSeconds
-  // for non-break reasons. Using the raw window duration keeps this consistent with how
-  // buildDowntimeReport itself accounts for time.
-  const totalDowntimeSeconds = stoppedSeconds;
+  // (plannedSeconds, which excludes scheduled breaks) minus downtime - plannedSeconds exists only
+  // as Availability's denominator below. This identity is what makes
+  // Total Shift Time = Operating Time + Total Downtime hold exactly, always.
   const operatingSeconds = Math.max(0, totalWindowSeconds - totalDowntimeSeconds);
+
+  // Reconciliation check: Total Shift Time must equal Operating Time + Total Downtime exactly -
+  // guaranteed by construction (operatingSeconds is derived as the complement of
+  // totalDowntimeSeconds above), but asserted defensively so any future change that breaks the
+  // identity surfaces immediately instead of silently drifting.
+  if (Math.abs(totalWindowSeconds - (operatingSeconds + totalDowntimeSeconds)) > 1) {
+    logger.warn(`OEE reconciliation mismatch for machine ${machineId} [${windowStart.toISOString()} - ${clippedEnd.toISOString()}]: shift=${totalWindowSeconds}s operating=${operatingSeconds}s downtime=${totalDowntimeSeconds}s`);
+  }
 
   // Machine Utilization = Running Time / raw window duration (includes breaks) - distinct from
   // Availability below, which uses Planned Production Time (break-excluded) as its denominator.
@@ -457,16 +463,10 @@ export async function buildOeeReportRows(machineId, startDate, endDate, { shift,
       });
 
       // A shift whose window has FULLY elapsed with zero Running seconds anywhere in it never
-      // actually got going - relabel any of its downtime still carrying the default 'Shift
-      // Start' reason to 'Shift not started', the same rule buildDowntimeReport already applies
-      // to the Downtime Analysis tab's reasons breakdown (kept in sync here so the OEE Report
-      // tab's own breakdown doesn't show a stale, un-relabeled 'Shift Start' total). The current
-      // in-progress shift is left alone - not yet a foregone conclusion whether it will start.
-      if (window.end.getTime() <= now && metrics.runningSeconds === 0 && metrics.downtimeReasons['Shift Start']) {
-        metrics.downtimeReasons['Shift not started'] =
-          (metrics.downtimeReasons['Shift not started'] || 0) + metrics.downtimeReasons['Shift Start'];
-        metrics.downtimeReasons['Shift Start'] = 0;
-      }
+      // actually got going - computeWindowMetrics (via computeShiftDowntime) already classifies
+      // 100% of such a shift's downtime as 'No Shift Started' internally, so no post-hoc
+      // relabeling is needed here; this is the exact same rule buildDowntimeReport applies for
+      // the Downtime Analysis tab, guaranteeing the two breakdowns always agree.
 
       // Skip shifts with nothing scheduled and nothing that happened - avoids cluttering the
       // report with rows for shifts the machine simply wasn't running in.
@@ -563,130 +563,80 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
   }
 
   const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
-  const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
   const logsById = new Map(logs.map((l) => [l.id, l]));
 
   const now = new Date();
   const effectiveRangeEnd = new Date(Math.min(rangeEnd.getTime(), now.getTime()));
 
-  // Resolved into a single non-overlapping timeline BEFORE splitting into per-shift events -
-  // duplicate-insert bugs have historically left genuinely overlapping status_logs rows for the
-  // same machine, and building events straight off the raw rows (as this used to) would count
-  // the same wall-clock downtime once per overlapping row. resolveStatusIntervals (shared with
-  // aggregateStatusLogs/computeWindowMetrics in oeeCalculator.js) is the single place that
-  // resolves overlaps, so Downtime Analysis and the OEE Report can never double-count differently
-  // from each other.
-  const resolvedIntervals = resolveStatusIntervals(logs, rangeStart, effectiveRangeEnd);
+  // A full, gap-filled, non-overlapping timeline across the ENTIRE requested range, used ONLY to
+  // look up each downtime event's neighboring status for display (statusBefore/statusAfter) - the
+  // actual totals/reasons/events below always come from computeShiftDowntime per (date, shift)
+  // window, the single source of truth ALSO used by computeWindowMetrics (OEE Report), so the two
+  // reports' Total Downtime can never drift apart.
+  const wideTimeline = resolveStatusIntervals(logs, rangeStart, effectiveRangeEnd).sort((a, b) => a.start - b.start);
+  const statusAt = (timeMs, side) => {
+    if (side === 'before') {
+      for (let i = wideTimeline.length - 1; i >= 0; i--) {
+        if (wideTimeline[i].end <= timeMs) return wideTimeline[i].status;
+      }
+      return null;
+    }
+    for (let i = 0; i < wideTimeline.length; i++) {
+      if (wideTimeline[i].start >= timeMs) return wideTimeline[i].status;
+    }
+    return null;
+  };
 
-  // A shift whose window has FULLY elapsed with zero Running seconds anywhere in it never
-  // actually got going - that's a materially different situation from the ordinary short delay
-  // between shift start and the first pulse (the ongoing/current shift, still in progress, is
-  // deliberately excluded here since it's not yet knowable whether it will start). Any downtime
-  // still carrying the default 'Shift Start' reason inside one of these windows is relabeled
-  // 'Shift not started' below, instead of silently inflating the 'Shift Start' bucket with hours
-  // that were never a startup delay at all.
-  const notStartedShiftKeys = new Set();
+  // A single continuous status row can predate rangeStart (a transition that began days ago) or
+  // run past rangeEnd/"now". Attributing its FULL raw duration to whichever shift its original
+  // start_time happened to fall in - as a naive "one log = one event" mapping would - lets an
+  // old, still-open row's entire multi-day duration leak into a single shift's report (Downtime
+  // % > 100%, an event dated days before the requested range). Instead, compute downtime fresh
+  // per (date, shift) window via computeShiftDowntime - it clips to that window's boundaries,
+  // resolves overlaps, fills any gap, and classifies every non-Running minute with a reason, so
+  // duration can never exceed the shift's own length and no minute is ever left unclassified.
+  const shiftsToWalk = shift ? [shift] : SHIFT_NAMES;
+  const allEvents = [];
   dates.forEach((dateStr) => {
-    SHIFT_NAMES.forEach((shiftName) => {
+    shiftsToWalk.forEach((shiftName) => {
       const window = getShiftWindow(dateStr, shiftName);
       if (window.start.getTime() > now.getTime()) return; // future shift - nothing happened yet
-      if (window.end.getTime() > now.getTime()) return; // still in progress - not a foregone conclusion
+      const clippedEnd = window.end.getTime() > now.getTime() ? now : window.end;
+      if (clippedEnd.getTime() <= window.start.getTime()) return;
+
       const midnightForDate = getShiftWindow(dateStr, 'Shift C').start;
       const breaksForDate = getPlannedBreaks(midnightForDate);
-      const { runningSeconds } = aggregateStatusLogs(allSorted, window.start, window.end, breaksForDate);
-      if (runningSeconds === 0) {
-        notStartedShiftKeys.add(`${dateStr}|${shiftName}`);
-      }
-    });
-  });
 
-  // A single continuous "Stopped" interval can predate rangeStart (a stoppage that began days
-  // ago and is still open) or run past rangeEnd/"now". Attributing its FULL raw duration to
-  // whichever shift its original start_time happened to fall in - as a naive "one log = one
-  // event" mapping would - lets an old, still-open stoppage's entire multi-day duration leak into
-  // a single shift's report (Downtime % > 100%, an event dated days before the requested range).
-  // Instead, split each resolved Stopped interval into one sub-event per (date, shift) window it
-  // actually overlaps within the requested range, clipped to that window's boundaries - duration
-  // can then never exceed the shift's own length, and date/shift always reflect real time spent
-  // in that window.
-  const allEvents = [];
-  resolvedIntervals
-    .filter((iv) => iv.status === 'Stopped')
-    .forEach((iv) => {
-      const rawLog = logsById.get(iv.id);
-      const idx = allSorted.findIndex((l) => l.id === iv.id);
-      const before = idx > 0 ? allSorted[idx - 1].status : null;
-      const after = idx >= 0 && idx < allSorted.length - 1 ? allSorted[idx + 1].status : null;
-      const reason = iv.reason || 'Other';
+      const { downtimeEvents } = computeShiftDowntime(logs, window.start, clippedEnd, breaksForDate);
 
-      // Resolved interval is already clipped to [rangeStart, effectiveRangeEnd] and truncated
-      // against any overlapping/later row - no further start/end derivation needed here.
-      const logStart = new Date(iv.start);
-      const logEnd = new Date(iv.end);
-      // The raw end this interval's own status_logs row actually carries - a real end_time if
-      // closed, or "now" if it's genuinely still open (not truncated by a later row/window edge).
-      // Used only to decide whether to surface the row's raw (possibly null/"ongoing") end_time
-      // below instead of a computed boundary.
-      const rawEndMs = rawLog?.end_time ? new Date(rawLog.end_time).getTime() : now.getTime();
+      downtimeEvents.forEach((e, idx) => {
+        // A real (non-synthetic) event whose underlying status_logs row is genuinely still open
+        // AND whose computed end lands exactly on "now" (not merely on this shift's own boundary)
+        // is an ongoing stoppage as of report generation - surfaced as endTime: null so the UI's
+        // existing "(Active)" badge keeps working, same as before this refactor.
+        const rawLog = e.id != null ? logsById.get(e.id) : null;
+        const stillOpen = !!rawLog && rawLog.end_time == null && e.end.getTime() === now.getTime();
 
-      dates.forEach((dateStr) => {
-        SHIFT_NAMES.forEach((shiftName) => {
-          const window = getShiftWindow(dateStr, shiftName);
-          const overlapStart = new Date(Math.max(logStart.getTime(), window.start.getTime()));
-          const overlapEnd = new Date(Math.min(logEnd.getTime(), window.end.getTime()));
-          if (overlapEnd <= overlapStart) return;
-
-          const shiftKey = `${dateStr}|${shiftName}`;
-          const effectiveReason = reason === 'Shift Start' && notStartedShiftKeys.has(shiftKey)
-            ? 'Shift not started'
-            : reason;
-
-          // Exclude planned-break overlap from the counted duration - but ONLY when this event's
-          // own reason is something OTHER than the break itself (e.g. 'Shift not started' bleeding
-          // through the plant's scheduled Shift C tea breaks, which shouldn't inflate that bucket).
-          // This mirrors how computeWindowMetrics/aggregateStatusLogs (oeeCalculator.js) exclude
-          // scheduled-break time from Planned Production Time/Operating Time for generic downtime.
-          // When the reason IS 'Tea Break'/'Lunch Break'/etc, the operator's actual stoppage rarely
-          // lines up exactly with the plant's fixed schedule (left 2 min early, back 4 min late) -
-          // subtracting the scheduled window's overlap from it would wrongly shave a real ~36-minute
-          // lunch stoppage down to ~7 minutes just because most of it coincided with the schedule.
-          // The full observed duration belongs entirely to that break reason.
-          let durationSeconds = (overlapEnd.getTime() - overlapStart.getTime()) / 1000;
-          if (!PLANNED_REASONS.has(effectiveReason)) {
-            const midnightForDate = getShiftWindow(dateStr, 'Shift C').start;
-            const breaksForDate = getPlannedBreaks(midnightForDate);
-            const breakOverlapSeconds = breaksForDate.reduce(
-              (s, b) => s + getIntervalOverlapSeconds(overlapStart, overlapEnd, b.start, b.end),
-              0
-            );
-            durationSeconds = Math.max(0, durationSeconds - breakOverlapSeconds);
-          }
-          if (durationSeconds <= 0) return;
-
-          allEvents.push({
-            id: `${iv.id}-${dateStr}-${shiftName}`,
-            date: dateStr,
-            shift: shiftName,
-            startTime: overlapStart,
-            endTime: overlapEnd.getTime() === rawEndMs ? (rawLog?.end_time ?? null) : overlapEnd,
-            durationSeconds,
-            reason: effectiveReason,
-            category: PLANNED_REASONS.has(effectiveReason) ? 'Planned' : 'Unplanned',
-            operator: iv.operator,
-            partNumber: iv.partName,
-            statusBefore: before,
-            statusAfter: after,
-            remarks: null
-          });
+        allEvents.push({
+          id: `${e.id ?? 'gap'}-${dateStr}-${shiftName}-${idx}`,
+          date: dateStr,
+          shift: shiftName,
+          startTime: e.start,
+          endTime: stillOpen ? null : e.end,
+          durationSeconds: e.durationSeconds,
+          reason: e.reason,
+          category: e.category,
+          operator: e.operator,
+          partNumber: e.partName,
+          statusBefore: statusAt(e.start.getTime(), 'before'),
+          statusAfter: statusAt(e.end.getTime(), 'after'),
+          remarks: null
         });
       });
     });
+  });
 
-  // Applied AFTER the before/after neighbor lookup above (which needs the full, unfiltered
-  // sequence of logs to correctly identify what status the machine was in immediately before/
-  // after each downtime event) - filtering the raw logs first would corrupt that neighbor lookup.
   const events = allEvents.filter((e) => {
-    if (shift && e.shift !== shift) return false;
     if (operator && e.operator !== operator) return false;
     if (partName && e.partNumber !== partName) return false;
     return true;
@@ -877,6 +827,15 @@ export async function buildHourlyBreakdown(machineId, dateStr, shiftName) {
   const pulses = await fetchPulsesInRange(machineId, window.start, effectiveEnd);
   const statusLogs = await fetchStatusLogsOverlapping(machineId, window.start, effectiveEnd);
 
+  // Classified ONCE for the whole shift (not per hour) via the same canonical timeline the OEE
+  // Report/Downtime Analysis use - 'No Shift Started'/'No Signal'/etc classification depends on
+  // knowing the FULL shift's first Running moment, which a per-hour call could never see (a
+  // downtime blip inside an otherwise-normal shift would be misread as "this hour never started").
+  // Sliced into hour buckets below, so every hour's downtimeSeconds sums back to the shift's own
+  // Total Downtime exactly, and every minute of every hour is covered - the same gap-filled,
+  // overlap-safe guarantee every other report gets from this timeline.
+  const shiftTimeline = buildClassifiedTimeline(statusLogs, window.start, effectiveEnd);
+
   const hours = [];
   let cursor = new Date(window.start);
   let cumulativeTarget = 0;
@@ -906,13 +865,31 @@ export async function buildHourlyBreakdown(machineId, dateStr, shiftName) {
     });
     cumulativeActual += hourPulses.length;
 
-    const { runningSeconds } = aggregateStatusLogs(statusLogs, cursor, hourEnd, breaks);
+    // Slice the whole-shift classified timeline down to this hour - runningSecondsForHour and
+    // downtimeSecondsForHour always sum to exactly totalWindowSeconds (the timeline has zero gaps
+    // and zero overlaps), so Operating Time = Total Shift Time - Total Downtime holds per hour too.
+    let runningSecondsForHour = 0;
+    let downtimeSecondsForHour = 0;
+    shiftTimeline.forEach((iv) => {
+      const overlapStart = Math.max(iv.start.getTime(), cursor.getTime());
+      const overlapEnd = Math.min(iv.end.getTime(), hourEnd.getTime());
+      if (overlapEnd <= overlapStart) return;
+      const overlapSeconds = (overlapEnd - overlapStart) / 1000;
+      if (iv.status === 'Running') runningSecondsForHour += overlapSeconds;
+      else downtimeSecondsForHour += overlapSeconds;
+    });
+
     const totalWindowSeconds = (hourEnd.getTime() - cursor.getTime()) / 1000;
     const hourBreakSeconds = breaks.reduce((s, b) => s + getIntervalOverlapSeconds(cursor, hourEnd, b.start, b.end), 0);
+    // Planned Production Time - Availability's denominator only, unrelated to the Operating
+    // Time/Total Downtime figures above (see computeShiftDowntime's docblock).
     const plannedSeconds = Math.max(1, totalWindowSeconds - hourBreakSeconds);
-    const operatingSeconds = Math.min(runningSeconds, plannedSeconds);
-    const downtimeSeconds = Math.max(0, plannedSeconds - operatingSeconds);
+    const operatingSeconds = Math.max(0, totalWindowSeconds - downtimeSecondsForHour);
     const goodCount = hourPulses.filter((p) => p.is_good === 1 || p.is_good === true).length;
+
+    if (Math.abs(totalWindowSeconds - (runningSecondsForHour + downtimeSecondsForHour)) > 1) {
+      logger.warn(`Hourly breakdown reconciliation mismatch for machine ${machineId} [${cursor.toISOString()} - ${hourEnd.toISOString()}]: window=${totalWindowSeconds}s running=${runningSecondsForHour}s downtime=${downtimeSecondsForHour}s`);
+    }
 
     const { availability, performance, quality, oee } = computeOeeFromTotals({
       plannedSeconds, operatingSeconds, totalCount: hourPulses.length, goodCount, idealCycleTime: idealCycleTimeForHour
@@ -927,7 +904,7 @@ export async function buildHourlyBreakdown(machineId, dateStr, shiftName) {
       actual: cumulativeActual,
       loss: Math.max(0, roundedTarget - cumulativeActual),
       achievementPercent: roundedTarget > 0 ? round1((cumulativeActual / roundedTarget) * 100) : null,
-      downtimeSeconds: Math.round(downtimeSeconds),
+      downtimeSeconds: Math.round(downtimeSecondsForHour),
       availability: round1(availability),
       performance: round1(performance),
       quality: round1(quality),
