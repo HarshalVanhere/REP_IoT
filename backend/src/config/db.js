@@ -608,23 +608,31 @@ async function connectAndSetupRealDatabase() {
 }
 
 /**
- * Finds and corrects 'Running' status_logs rows whose ENTIRE duration has zero corroborating
- * pulses, spanning far longer than the machine could plausibly go between cycles - not real
- * Operating Time, but corrupted data. First confirmed in production: the historical duplicate-
- * insert race (see the cleanup in connectAndSetupRealDatabase above) could leave a "surviving"
- * row open with no way to know if the machine was genuinely producing, later closed out by an
- * unrelated future event - producing a multi-hour "Running" span with 0 pulses inside it.
+ * Finds and corrects 'Running' status_logs rows that claim Operating Time far longer than the
+ * machine could plausibly go without a corroborating pulse - not real Operating Time, but
+ * corrupted data. First confirmed in production: the historical duplicate-insert race (see the
+ * cleanup in connectAndSetupRealDatabase above) could leave a "surviving" row open with no way to
+ * know if the machine was genuinely producing, later closed out by an unrelated future event.
+ * Two distinct shapes of this were found in real data:
+ *   1. A row with ZERO pulses anywhere in its span (the original case: Shift C showing ~24
+ *      minutes of downtime with 0 production the whole shift) - collapsed to zero duration.
+ *   2. A row that DOES have real pulses, but only starting hours after its recorded start_time
+ *      (or ending hours before its recorded end_time) - e.g. a ~14-hour Running row whose first
+ *      pulse doesn't land until ~12.5 hours in, discovered when a "Yesterday" report for the SAME
+ *      machine showed the identical symptom (100% Availability, 0 downtime, 0 production) for a
+ *      row that DID have pulses, just not for most of its claimed duration. The pulse-free
+ *      leading/trailing portion is trimmed back to (first/last real pulse +/- one ideal cycle),
+ *      not the whole row discarded - the portion that DOES have corroborating pulses is real.
  * Downtime/OEE reports trust status_logs as ground truth (by design - see computeShiftDowntime),
- * so a row like this silently reports near-zero downtime for a shift where nothing was actually
- * produced - exactly what a domain user spotted (Shift C showing ~24 minutes of downtime with 0
- * production the whole shift). The threshold (3x the machine's own idealTime+120s cycle-timeout
- * window, floored at 30 minutes) is deliberately generous - verified against real production data
- * to flag only genuinely implausible spans, never a legitimately slow but real production run
- * (which always has SOME pulses inside it).
+ * so either shape silently reports near-zero downtime for a period where little or nothing was
+ * actually produced. The threshold (3x the machine's own idealTime+120s cycle-timeout window,
+ * floored at 30 minutes) is deliberately generous - verified against real production data (97
+ * long-but-legitimate Running rows for one machine alone) to flag only genuinely implausible
+ * gaps, never a legitimately slow but real production run.
  *
- * Exported so both the one-off, unbounded boot-time sweep above AND watchdogService's periodic,
- * recent-only tick run the exact same detection/correction logic - one implementation, not two
- * that could drift apart.
+ * Exported so both the one-off boot-time sweep above AND watchdogService's periodic, recent-only
+ * tick run the exact same detection/correction logic - one implementation, not two that could
+ * drift apart.
  *
  * @param {Date} [sinceEnd] - only consider rows whose end_time is on/after this instant. Omitted
  *   for a truly unbounded sweep; both callers in this codebase pass a bound (60 days at boot, a
@@ -640,37 +648,74 @@ export async function correctImplausibleRunningRows(sinceEnd = null) {
     params.push(sinceEnd);
   }
 
-  // Pulse count computed via a correlated subquery in the SAME query, not a separate round-trip
-  // per candidate row - against a remote DB (100-500ms/round-trip), an N+1 loop here made boot
-  // take 30-45s+ once a machine accumulated a normal season's worth of long (legitimate) Running
-  // rows. MySQL evaluates the subquery server-side per row, which is orders of magnitude cheaper
-  // than one full network round-trip per row from Node.
-  const [suspectRows] = await pool.query(`
-    SELECT sl.id, sl.machine_id, sl.start_time, sl.end_time,
-      (SELECT COUNT(*) FROM pulses p
+  // First/last pulse timestamps computed via correlated subqueries in the SAME query, not a
+  // separate round-trip per candidate row - against a remote DB (100-500ms/round-trip), an N+1
+  // loop here made boot take 30-45s+ once a machine accumulated a normal season's worth of long
+  // (legitimate) Running rows. The pre-filter (duration > threshold) keeps the candidate set - and
+  // therefore the per-row correction work done in JS below - small.
+  const [candidates] = await pool.query(`
+    SELECT sl.id, sl.machine_id, sl.start_time, sl.end_time, m.ideal_cycle_time,
+      (SELECT MIN(p.timestamp) FROM pulses p
        WHERE p.machine_id = sl.machine_id AND p.timestamp >= sl.start_time AND p.timestamp < sl.end_time
-      ) AS pulseCount
+      ) AS firstPulse,
+      (SELECT MAX(p.timestamp) FROM pulses p
+       WHERE p.machine_id = sl.machine_id AND p.timestamp >= sl.start_time AND p.timestamp < sl.end_time
+      ) AS lastPulse
     FROM status_logs sl
     JOIN machines m ON m.id = sl.machine_id
     WHERE sl.status = 'Running'
       AND sl.end_time IS NOT NULL
       AND TIMESTAMPDIFF(SECOND, sl.start_time, sl.end_time) > GREATEST(1800, 3 * (m.ideal_cycle_time + 120))
       ${sinceClause}
-    HAVING pulseCount = 0
   `, params);
 
   let correctedCount = 0;
-  for (const row of suspectRows) {
-    // Collapse to a zero-duration artifact (same resolution the duplicate-insert cleanup above
-    // already applies to its non-surviving rows) - resolveStatusIntervals's gap-filling then
-    // correctly reclassifies the vacated span as real downtime instead of fabricated Operating
-    // Time. synced=FALSE so any Edge Gateway/Cloud mirror that already uploaded the old (wrong)
-    // duration re-syncs the correction.
-    await pool.query(
-      'UPDATE status_logs SET end_time = start_time, synced = FALSE WHERE id = ?',
-      [row.id]
-    );
-    correctedCount++;
+  for (const row of candidates) {
+    const idealTime = row.ideal_cycle_time || 15;
+    const implausibleThresholdSeconds = Math.max(1800, 3 * (idealTime + 120));
+    const start = new Date(row.start_time).getTime();
+    const end = new Date(row.end_time).getTime();
+
+    if (!row.firstPulse) {
+      // Case 1: no corroborating pulse anywhere in the span - collapse to a zero-duration
+      // artifact (same resolution the duplicate-insert cleanup above already applies to its
+      // non-surviving rows). resolveStatusIntervals's gap-filling then correctly reclassifies
+      // the vacated span as real downtime instead of fabricated Operating Time.
+      await pool.query(
+        'UPDATE status_logs SET end_time = start_time, synced = FALSE WHERE id = ?',
+        [row.id]
+      );
+      correctedCount++;
+      continue;
+    }
+
+    // Case 2: real pulses exist, but a leading and/or trailing stretch of the row has none -
+    // trim the claimed start/end back to just before the first/after the last real pulse
+    // (one ideal cycle of grace, since a pulse marks CYCLE COMPLETION - the machine could
+    // genuinely have started up to one cycle before its first completion pulse landed).
+    const firstPulseMs = new Date(row.firstPulse).getTime();
+    const lastPulseMs = new Date(row.lastPulse).getTime();
+    const leadGapSeconds = (firstPulseMs - start) / 1000;
+    const trailGapSeconds = (end - lastPulseMs) / 1000;
+
+    let newStart = start;
+    let newEnd = end;
+    if (leadGapSeconds > implausibleThresholdSeconds) {
+      newStart = Math.min(firstPulseMs, firstPulseMs - idealTime * 1000);
+      newStart = Math.max(newStart, start); // never move start earlier than it already was
+    }
+    if (trailGapSeconds > implausibleThresholdSeconds) {
+      newEnd = Math.max(lastPulseMs, lastPulseMs + idealTime * 1000);
+      newEnd = Math.min(newEnd, end); // never move end later than it already was
+    }
+
+    if (newStart !== start || newEnd !== end) {
+      await pool.query(
+        'UPDATE status_logs SET start_time = ?, end_time = ?, synced = FALSE WHERE id = ?',
+        [new Date(newStart), new Date(newEnd), row.id]
+      );
+      correctedCount++;
+    }
   }
   return correctedCount;
 }
