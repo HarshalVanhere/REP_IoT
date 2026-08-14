@@ -522,6 +522,71 @@ async function connectAndSetupRealDatabase() {
     } catch (err) {
       console.warn('⚠️  shift_plans -> part_schedules migration skipped:', err.message);
     }
+
+    // PERMANENT FIX for the recurring duplicate/open status_logs rows bug (see a6d01ef..a2e0410):
+    // every previous attempt added another withMachineLock() call around another individual
+    // writer, but that lock is an in-memory Map scoped to THIS process (see machineLock.js) - it
+    // cannot stop two different processes (e.g. this server after a restart/redeploy racing its
+    // own previous instance mid-shutdown, or any future second instance) from both seeing "no
+    // open row" and both inserting one. That's a check-then-act race no amount of application
+    // locking closes; only a database constraint can. This makes "more than one open status log
+    // per machine" structurally impossible at the DB level, so every writer's SELECT-then-INSERT
+    // becomes an optimization rather than the actual source of truth.
+    try {
+      // 1. Clean up any duplicate open rows that already exist (e.g. from before this fix) -
+      // the unique index below will fail to create otherwise. Keep the earliest (lowest id) open
+      // row per machine, close the rest out at their own start_time (0-duration, clearly a
+      // cleanup artifact rather than a fabricated real duration).
+      const [dupeMachines] = await pool.query(`
+        SELECT machine_id FROM status_logs
+        WHERE end_time IS NULL
+        GROUP BY machine_id
+        HAVING COUNT(*) > 1
+      `);
+      for (const { machine_id } of dupeMachines) {
+        const [openRows] = await pool.query(
+          'SELECT id, start_time FROM status_logs WHERE machine_id = ? AND end_time IS NULL ORDER BY id ASC',
+          [machine_id]
+        );
+        for (let i = 1; i < openRows.length; i++) {
+          await pool.query(
+            'UPDATE status_logs SET end_time = ?, synced = FALSE WHERE id = ?',
+            [openRows[i].start_time, openRows[i].id]
+          );
+        }
+      }
+      if (dupeMachines.length > 0) {
+        console.log(`   + Cleaned up duplicate open status_logs rows for ${dupeMachines.length} machine(s)`);
+      }
+    } catch (err) {
+      console.warn('⚠️  status_logs duplicate cleanup skipped:', err.message);
+    }
+    try {
+      // 2. A generated column that is 1 while a row is open (end_time IS NULL) and NULL once
+      // closed. MySQL unique indexes treat NULL as "no value to compare" (multiple NULLs never
+      // conflict), so this only ever constrains the OPEN rows - exactly the invariant every
+      // status_logs writer already assumes ("at most one open row per machine") but never had
+      // enforced.
+      await pool.query(
+        'ALTER TABLE status_logs ADD COLUMN is_open TINYINT GENERATED ALWAYS AS (IF(end_time IS NULL, 1, NULL)) STORED'
+      );
+      console.log('   + Added "is_open" generated column to status_logs table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
+      await pool.query(
+        'ALTER TABLE status_logs ADD UNIQUE KEY uniq_status_logs_open_machine (machine_id, is_open)'
+      );
+      console.log('   + Added unique constraint enforcing one open status log per machine');
+    } catch (err) {
+      // Ignore if constraint already exists (or, if duplicates were re-introduced since the
+      // cleanup above ran on some earlier boot, log it loudly since it means the invariant is
+      // still being violated somewhere upstream)
+      if (!/duplicate/i.test(err.message)) {
+        console.warn('⚠️  status_logs unique-open-row constraint not applied:', err.message);
+      }
+    }
 }
 
 // Background self-healing loop for the case where `connectAndSetupRealDatabase()` fails at

@@ -338,11 +338,24 @@ async function handleResumeMessageLocked(machineId, reason, operatorId) {
     );
   }
 
-  // 4. Open a new active log for Running status with active operator ID
-  await db.query(
-    "INSERT INTO status_logs (machine_id, status, start_time, operator_id) VALUES (?, 'Running', ?, ?)",
-    [machineId, timestamp, operatorId]
-  );
+  // 4. Open a new active log for Running status with active operator ID. Same fallback as
+  // ensureActiveStatusLogLocked - the (machine_id, is_open) unique constraint (db.js) is the
+  // actual source of truth, not the close-then-insert above.
+  try {
+    await db.query(
+      "INSERT INTO status_logs (machine_id, status, start_time, operator_id) VALUES (?, 'Running', ?, ?)",
+      [machineId, timestamp, operatorId]
+    );
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      await db.query(
+        "UPDATE status_logs SET status = 'Running', start_time = ?, operator_id = ?, synced = FALSE WHERE machine_id = ? AND end_time IS NULL",
+        [timestamp, operatorId, machineId]
+      );
+    } else {
+      throw err;
+    }
+  }
 
   logger.info(`🔌 Machine ${machineId} resumed by ${operatorId || 'system'}: ${currentStatus} ➡️ Running (Reason: ${reason})`);
 
@@ -400,9 +413,24 @@ async function ensureActiveStatusLogLocked(machineId, targetStatus, timestamp) {
     );
   }
 
-  // Open a new active log
-  await db.query(
-    'INSERT INTO status_logs (machine_id, status, start_time, end_time) VALUES (?, ?, ?, NULL)',
-    [machineId, targetStatus, timestamp]
-  );
+  // Open a new active log. The (machine_id, is_open) unique constraint (see db.js) is the real
+  // guard against more than one open row per machine - the SELECT+UPDATE above is only an
+  // in-process optimization to avoid hitting it in the common case. If some other writer (a
+  // concurrent /sync/data batch, another process) won the race and opened a row in between,
+  // fall back to updating it in place instead of crashing this caller.
+  try {
+    await db.query(
+      'INSERT INTO status_logs (machine_id, status, start_time, end_time) VALUES (?, ?, ?, NULL)',
+      [machineId, targetStatus, timestamp]
+    );
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      await db.query(
+        'UPDATE status_logs SET status = ?, start_time = ?, synced = FALSE WHERE machine_id = ? AND end_time IS NULL',
+        [targetStatus, timestamp, machineId]
+      );
+    } else {
+      throw err;
+    }
+  }
 }

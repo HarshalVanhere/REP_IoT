@@ -109,6 +109,26 @@ async function setup() {
     } catch (err) {
       // Ignore if index already exists
     }
+    // PERMANENT FIX for duplicate open status_logs rows - see the matching, more detailed
+    // comment in db.js's connectAndSetupRealDatabase(), which is what actually runs this
+    // migration against a live server's DB on every boot. Mirrored here so a fresh install
+    // (npm run setup) creates the table with the invariant already in place.
+    try {
+      await connection.query(
+        'ALTER TABLE status_logs ADD COLUMN is_open TINYINT GENERATED ALWAYS AS (IF(end_time IS NULL, 1, NULL)) STORED'
+      );
+      console.log('   + Added "is_open" generated column to status_logs table');
+    } catch (err) {
+      // Ignore if column already exists
+    }
+    try {
+      await connection.query(
+        'ALTER TABLE status_logs ADD UNIQUE KEY uniq_status_logs_open_machine (machine_id, is_open)'
+      );
+      console.log('   + Added unique constraint enforcing one open status log per machine');
+    } catch (err) {
+      // Ignore if constraint already exists
+    }
 
     // Create users table
     console.log('🛠️  Creating "users" table...');

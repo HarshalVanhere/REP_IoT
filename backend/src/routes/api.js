@@ -856,18 +856,34 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
             [startTime, log.machine_id]
           );
         }
-        await connection.query(
-          'INSERT INTO status_logs (machine_id, status, start_time, end_time, downtime_reason, operator_id, part_name, synced) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)',
-          [
-            log.machine_id,
-            log.status,
-            startTime,
-            endTime,
-            log.downtime_reason,
-            log.operator_id,
-            log.part_name
-          ]
-        );
+        // The (machine_id, is_open) unique constraint (see db.js) is the real guard here - the
+        // close-above/insert-below pattern is only an optimization. If another writer (a
+        // concurrent overlapping sync batch, MQTT telemetry racing in) won and already holds the
+        // open slot for this machine, fall back to updating that row in place instead of letting
+        // the whole batch transaction fail.
+        try {
+          await connection.query(
+            'INSERT INTO status_logs (machine_id, status, start_time, end_time, downtime_reason, operator_id, part_name, synced) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)',
+            [
+              log.machine_id,
+              log.status,
+              startTime,
+              endTime,
+              log.downtime_reason,
+              log.operator_id,
+              log.part_name
+            ]
+          );
+        } catch (err) {
+          if (err.code === 'ER_DUP_ENTRY' && endTime === null) {
+            await connection.query(
+              'UPDATE status_logs SET status = ?, start_time = ?, downtime_reason = ?, operator_id = ?, part_name = ?, synced = TRUE WHERE machine_id = ? AND end_time IS NULL',
+              [log.status, startTime, log.downtime_reason, log.operator_id, log.part_name, log.machine_id]
+            );
+          } else {
+            throw err;
+          }
+        }
       } else {
         // If it exists but end_time is now closed, update it
         if (endTime) {
@@ -922,10 +938,21 @@ router.post('/sync/data', requireSyncKey, async (req, res) => {
         'UPDATE status_logs SET end_time = ? WHERE machine_id = ? AND end_time IS NULL',
         [reconciledAt, machineId]
       );
-      await connection.query(
-        "INSERT INTO status_logs (machine_id, status, start_time, end_time) VALUES (?, 'Running', ?, NULL)",
-        [machineId, reconciledAt]
-      );
+      try {
+        await connection.query(
+          "INSERT INTO status_logs (machine_id, status, start_time, end_time) VALUES (?, 'Running', ?, NULL)",
+          [machineId, reconciledAt]
+        );
+      } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          await connection.query(
+            "UPDATE status_logs SET status = 'Running', start_time = ? WHERE machine_id = ? AND end_time IS NULL",
+            [reconciledAt, machineId]
+          );
+        } else {
+          throw err;
+        }
+      }
       await connection.query("UPDATE machines SET status = 'Running' WHERE id = ?", [machineId]);
       logger.warn(`🔄 Sync: Machine ${machineId} received a pulse newer than its last known status change (cloud had it as "${machineRow.status}") - reconciling to Running.`);
     }
