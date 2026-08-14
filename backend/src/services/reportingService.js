@@ -1,6 +1,6 @@
 import db from '../config/db.js';
 import { SHIFT_NAMES, getShiftWindow, buildPlantDateTime, formatPlantTime } from '../config/shifts.js';
-import { getPlannedBreaks, aggregateStatusLogs, computeOeeFromTotals, getIntervalOverlapSeconds, calculateAutoTarget } from './oeeCalculator.js';
+import { getPlannedBreaks, aggregateStatusLogs, resolveStatusIntervals, computeOeeFromTotals, getIntervalOverlapSeconds, calculateAutoTarget } from './oeeCalculator.js';
 import { PLANNED_REASONS } from '../config/reasonCodes.js';
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10;
@@ -191,11 +191,19 @@ export async function computeWindowMetrics(machineId, dateStr, windowStart, wind
   const totalWindowSeconds = Math.max(0, (clippedEnd.getTime() - windowStart.getTime()) / 1000);
   const plannedSeconds = Math.max(1, totalWindowSeconds - breakSeconds);
 
-  // Operating Time = actual Running Time, not a residual of Stopped/No-Signal logs - a window
-  // with no status_logs rows at all (machine never ran) must show zero Operating Time and full
-  // downtime, not the other way around. Downtime is then derived FROM Running Time.
-  const operatingSeconds = Math.min(runningSeconds, plannedSeconds);
-  const totalDowntimeSeconds = Math.max(0, plannedSeconds - operatingSeconds);
+  // Total Downtime = stoppedSeconds, the SAME timestamp-based, break-exclusion-adjusted sum of
+  // 'Stopped' status_logs intervals that buildDowntimeReport (Downtime Analysis) computes for
+  // this exact window - both are now built from resolveStatusIntervals' overlap-safe timeline, so
+  // the two reports' Total Downtime figures can never drift apart (see buildDowntimeReport below
+  // for the matching logic, including 'Shift Start'/'Shift not started' handling).
+  //
+  // Operating Time = Total Shift Time - Total Downtime. Deliberately NOT Planned Production Time
+  // (plannedSeconds, which already excludes breaks) minus downtime - that would double-subtract
+  // break time that's already excluded from plannedSeconds AND folded into totalDowntimeSeconds
+  // for non-break reasons. Using the raw window duration keeps this consistent with how
+  // buildDowntimeReport itself accounts for time.
+  const totalDowntimeSeconds = stoppedSeconds;
+  const operatingSeconds = Math.max(0, totalWindowSeconds - totalDowntimeSeconds);
 
   // Machine Utilization = Running Time / raw window duration (includes breaks) - distinct from
   // Availability below, which uses Planned Production Time (break-excluded) as its denominator.
@@ -556,8 +564,19 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
 
   const logs = await fetchStatusLogsOverlapping(machineId, rangeStart, rangeEnd);
   const allSorted = [...logs].sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+  const logsById = new Map(logs.map((l) => [l.id, l]));
 
   const now = new Date();
+  const effectiveRangeEnd = new Date(Math.min(rangeEnd.getTime(), now.getTime()));
+
+  // Resolved into a single non-overlapping timeline BEFORE splitting into per-shift events -
+  // duplicate-insert bugs have historically left genuinely overlapping status_logs rows for the
+  // same machine, and building events straight off the raw rows (as this used to) would count
+  // the same wall-clock downtime once per overlapping row. resolveStatusIntervals (shared with
+  // aggregateStatusLogs/computeWindowMetrics in oeeCalculator.js) is the single place that
+  // resolves overlaps, so Downtime Analysis and the OEE Report can never double-count differently
+  // from each other.
+  const resolvedIntervals = resolveStatusIntervals(logs, rangeStart, effectiveRangeEnd);
 
   // A shift whose window has FULLY elapsed with zero Running seconds anywhere in it never
   // actually got going - that's a materially different situation from the ordinary short delay
@@ -581,27 +600,34 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
     });
   });
 
-  // A single continuous "Stopped" status_logs row can predate rangeStart (a stoppage that began
-  // days ago and is still open) or run past rangeEnd/"now". Attributing its FULL raw duration to
+  // A single continuous "Stopped" interval can predate rangeStart (a stoppage that began days
+  // ago and is still open) or run past rangeEnd/"now". Attributing its FULL raw duration to
   // whichever shift its original start_time happened to fall in - as a naive "one log = one
   // event" mapping would - lets an old, still-open stoppage's entire multi-day duration leak into
   // a single shift's report (Downtime % > 100%, an event dated days before the requested range).
-  // Instead, split each log into one sub-event per (date, shift) window it actually overlaps
-  // within the requested range, clipped to that window's boundaries - duration can then never
-  // exceed the shift's own length, and date/shift always reflect real time spent in that window.
+  // Instead, split each resolved Stopped interval into one sub-event per (date, shift) window it
+  // actually overlaps within the requested range, clipped to that window's boundaries - duration
+  // can then never exceed the shift's own length, and date/shift always reflect real time spent
+  // in that window.
   const allEvents = [];
-  allSorted
-    .filter((log) => log.status === 'Stopped')
-    .forEach((log) => {
-      const idx = allSorted.findIndex((l) => l.id === log.id);
+  resolvedIntervals
+    .filter((iv) => iv.status === 'Stopped')
+    .forEach((iv) => {
+      const rawLog = logsById.get(iv.id);
+      const idx = allSorted.findIndex((l) => l.id === iv.id);
       const before = idx > 0 ? allSorted[idx - 1].status : null;
       const after = idx >= 0 && idx < allSorted.length - 1 ? allSorted[idx + 1].status : null;
-      const reason = log.downtime_reason || 'Other';
+      const reason = iv.reason || 'Other';
 
-      const logStart = new Date(Math.max(new Date(log.start_time).getTime(), rangeStart.getTime()));
-      const logEndRaw = log.end_time ? new Date(log.end_time) : new Date();
-      const logEnd = new Date(Math.min(logEndRaw.getTime(), rangeEnd.getTime()));
-      if (logEnd <= logStart) return;
+      // Resolved interval is already clipped to [rangeStart, effectiveRangeEnd] and truncated
+      // against any overlapping/later row - no further start/end derivation needed here.
+      const logStart = new Date(iv.start);
+      const logEnd = new Date(iv.end);
+      // The raw end this interval's own status_logs row actually carries - a real end_time if
+      // closed, or "now" if it's genuinely still open (not truncated by a later row/window edge).
+      // Used only to decide whether to surface the row's raw (possibly null/"ongoing") end_time
+      // below instead of a computed boundary.
+      const rawEndMs = rawLog?.end_time ? new Date(rawLog.end_time).getTime() : now.getTime();
 
       dates.forEach((dateStr) => {
         SHIFT_NAMES.forEach((shiftName) => {
@@ -638,16 +664,16 @@ export async function buildDowntimeReport(machineId, startDate, endDate, groupBy
           if (durationSeconds <= 0) return;
 
           allEvents.push({
-            id: `${log.id}-${dateStr}-${shiftName}`,
+            id: `${iv.id}-${dateStr}-${shiftName}`,
             date: dateStr,
             shift: shiftName,
             startTime: overlapStart,
-            endTime: overlapEnd.getTime() === logEndRaw.getTime() ? log.end_time : overlapEnd,
+            endTime: overlapEnd.getTime() === rawEndMs ? (rawLog?.end_time ?? null) : overlapEnd,
             durationSeconds,
             reason: effectiveReason,
             category: PLANNED_REASONS.has(effectiveReason) ? 'Planned' : 'Unplanned',
-            operator: log.operator_id,
-            partNumber: log.part_name,
+            operator: iv.operator,
+            partNumber: iv.partName,
             statusBefore: before,
             statusAfter: after,
             remarks: null

@@ -61,35 +61,52 @@ export function getIntervalOverlapSeconds(start1, end1, start2, end2) {
 }
 
 /**
- * Reconstructs a single non-overlapping status timeline from a set of status_logs rows, clips it
- * to [windowStart, windowEnd], subtracts any overlap with the given planned breaks, and buckets
- * the remaining duration into Running/Stopped/Not Connected totals (plus downtime-by-reason).
- * Shared by the live "since midnight" calculation below and reportingService.js's arbitrary
- * historical windows, so the two can never compute utilization differently.
+ * Reconstructs a single non-overlapping status timeline from a set of status_logs rows, clipped
+ * to [windowStart, windowEnd]. Shared by aggregateStatusLogs below AND reportingService.js's
+ * buildDowntimeReport, so the Downtime Analysis event list and every downtime/uptime total
+ * derived from status_logs (OEE Report included) are always built from the exact same resolved
+ * intervals - the single fix point for "overlapping downtime events double-counted".
  *
  * status_logs rows are sometimes left with a NULL end_time when a transition wasn't closed out
- * properly (e.g. a dropped connection racing the next status change). Summed naively, such a row
- * counts as Running/Stopped forever - including bleeding into every later shift's window, and
- * stacking on top of whatever legitimately runs there - which is what let Operating Time inflate
- * to match (or exceed) Planned Production Time and made Downtime read 0 even on shifts with real
- * stoppages. Fix: sort all rows by their ORIGINAL start_time and truncate each one's effective
- * end at the start of the next chronologically distinct row - a later transition always
- * supersedes an earlier, still-"open" one. Rows sharing the exact same start_time (legitimate
- * simultaneous companions, e.g. 'Stopped' + 'Not Connected' logged together for one disconnect)
- * are left alone rather than truncating each other.
+ * properly (e.g. a dropped connection racing the next status change), and duplicate-insert bugs
+ * have historically left genuinely overlapping rows for the same machine. Summed naively, such
+ * rows count as Running/Stopped forever - including bleeding into every later shift's window, and
+ * stacking on top of whatever legitimately runs there, or double-counting the same wall-clock
+ * downtime twice. Fix: sort all rows by their ORIGINAL start_time and truncate each one's
+ * effective end at the start of the next chronologically distinct row - a later transition always
+ * supersedes an earlier, still-"open" or overlapping one. Rows sharing the exact same start_time
+ * with DIFFERENT statuses (legitimate simultaneous companions, e.g. 'Stopped' + 'Not Connected'
+ * logged together for one disconnect) are left alone rather than truncating each other. Rows
+ * sharing both the same start_time AND the same status - the signature of a duplicate-insert
+ * race, not a real companion pair - are collapsed into one interval instead of each contributing
+ * their own full duration, otherwise that single stoppage would count as downtime twice.
  */
-export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
+export function resolveStatusIntervals(logs, windowStart, windowEnd) {
   const winStart = windowStart.getTime();
   const winEnd = windowEnd.getTime();
 
-  const originals = logs
-    .map((log) => ({
-      start: new Date(log.start_time).getTime(),
-      end: log.end_time ? new Date(log.end_time).getTime() : Infinity,
-      status: log.status,
-      reason: log.downtime_reason
-    }))
-    .sort((a, b) => a.start - b.start);
+  const deduped = new Map();
+  for (const log of logs) {
+    const start = new Date(log.start_time).getTime();
+    const end = log.end_time ? new Date(log.end_time).getTime() : Infinity;
+    const key = `${start}|${log.status}`;
+    const existing = deduped.get(key);
+    // Keep the row with the LATEST effective end (Infinity/still-open wins) - a duplicate that
+    // never got closed out is the one that reflects this interval's true extent.
+    if (!existing || end > existing.end) {
+      deduped.set(key, {
+        id: log.id,
+        start,
+        end,
+        status: log.status,
+        reason: log.downtime_reason,
+        operator: log.operator_id,
+        partName: log.part_name
+      });
+    }
+  }
+
+  const originals = [...deduped.values()].sort((a, b) => a.start - b.start);
 
   const distinctStarts = [...new Set(originals.map((l) => l.start))];
   const nextDistinctStart = (t) => {
@@ -100,14 +117,28 @@ export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
     return best;
   };
 
-  const resolved = originals
+  return originals
     .map((l) => ({
+      id: l.id,
       start: Math.max(l.start, winStart),
       end: Math.min(l.end, nextDistinctStart(l.start), winEnd),
       status: l.status,
-      reason: l.reason
+      reason: l.reason,
+      operator: l.operator,
+      partName: l.partName
     }))
     .filter((l) => l.end > l.start);
+}
+
+/**
+ * Clips a resolved status timeline to [windowStart, windowEnd], subtracts any overlap with the
+ * given planned breaks, and buckets the remaining duration into Running/Stopped/Not Connected
+ * totals (plus downtime-by-reason). Shared by the live "since midnight" calculation below and
+ * reportingService.js's arbitrary historical windows, so the two can never compute utilization
+ * differently.
+ */
+export function aggregateStatusLogs(logs, windowStart, windowEnd, breaks) {
+  const resolved = resolveStatusIntervals(logs, windowStart, windowEnd);
 
   let runningSeconds = 0;
   let stoppedSeconds = 0;
