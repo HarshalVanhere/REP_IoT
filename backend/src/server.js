@@ -173,6 +173,23 @@ server.listen(PORT, () => {
   logger.info(`💻 Express & WS Server running on http://localhost:${PORT}`);
 });
 
+// Optional memory diagnostics for tracking down RAM usage in production - disabled by default,
+// enable with MEMORY_DEBUG=true. Logs process.memoryUsage() once a minute; negligible overhead.
+let memoryDebugInterval = null;
+if (process.env.MEMORY_DEBUG === 'true') {
+  memoryDebugInterval = setInterval(() => {
+    const m = process.memoryUsage();
+    logger.info('📊 Memory usage:', {
+      rssMB: (m.rss / 1024 / 1024).toFixed(2),
+      heapUsedMB: (m.heapUsed / 1024 / 1024).toFixed(2),
+      heapTotalMB: (m.heapTotal / 1024 / 1024).toFixed(2),
+      externalMB: (m.external / 1024 / 1024).toFixed(2),
+      arrayBuffersMB: (m.arrayBuffers / 1024 / 1024).toFixed(2)
+    });
+  }, 60000);
+  memoryDebugInterval.unref();
+}
+
 // Graceful shutdown - important for a systemd-managed service (see cnc-backend.service)
 // so restarts/deploys don't corrupt in-flight DB writes or leave the serial port locked.
 let shuttingDown = false;
@@ -182,6 +199,7 @@ async function shutdown(signal) {
   logger.info(`${signal} received. Shutting down gracefully...`);
 
   clearInterval(heartbeatInterval);
+  if (memoryDebugInterval) clearInterval(memoryDebugInterval);
   stopWatchdogService();
 
   wss.clients.forEach((client) => client.close());

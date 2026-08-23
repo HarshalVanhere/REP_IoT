@@ -271,12 +271,20 @@ router.get('/reports/production-summary', requireAuth, async (req, res) => {
   const groupBy = ['part', 'shift', 'machine'].includes(req.query.groupBy) ? req.query.groupBy : 'part';
 
   try {
-    const [allRecords] = await db.query('SELECT * FROM production_records');
+    // Bounded to the requested plant calendar day at the SQL level - production_records is an
+    // append-only history table that grows without limit over months of 24x7 operation, so
+    // pulling the entire table into Node memory on every dashboard request was unbounded and
+    // wasteful. Mirrors the original in-memory filter (start_time OR end_time falls on `date`).
+    const rangeStart = getShiftWindow(date, 'Shift C').start;
+    const rangeEnd = new Date(rangeStart.getTime() + 24 * 3600000);
+    const [allRecords] = await db.query(
+      'SELECT * FROM production_records WHERE (start_time >= ? AND start_time < ?) OR (end_time >= ? AND end_time < ?)',
+      [rangeStart, rangeEnd, rangeStart, rangeEnd]
+    );
     const [machines] = await db.query('SELECT id, name FROM machines');
     const machineNameById = Object.fromEntries(machines.map((m) => [m.id, m.name]));
 
     const dayRows = allRecords
-      .filter((r) => toDateOnlyString(r.start_time) === date || toDateOnlyString(r.end_time) === date)
       .map((r) => ({
         machine_id: r.machine_id,
         machine_name: machineNameById[r.machine_id] || r.machine_id,

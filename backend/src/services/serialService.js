@@ -1,5 +1,3 @@
-import { SerialPort } from 'serialport';
-import { ReadlineParser } from '@serialport/parser-readline';
 import db from '../config/db.js';
 import { handlePulseMessage, handleStatusMessage, handleHeartbeatMessage } from './mqttService.js';
 import { logger } from '../utils/logger.js';
@@ -8,6 +6,8 @@ import { withMachineLock } from '../utils/machineLock.js';
 let portInstance = null;
 let reconnectTimer = null;
 const pendingAcks = new Map(); // command -> { resolve, reject, timeout }
+let SerialPortClass = null;
+let ReadlineParserClass = null;
 
 /**
  * Each Pi + ESP32 edge gateway is wired to exactly one physical machine, identified by
@@ -21,7 +21,7 @@ function getGatewayMachineId() {
 /**
  * Starts the Serial port listener on the Edge Gateway
  */
-export function startSerialListener() {
+export async function startSerialListener() {
   const isEdgeGateway = process.env.IS_EDGE_GATEWAY === 'true';
   const portPath = process.env.SERIAL_PORT || '/dev/ttyUSB0';
   const baudRate = parseInt(process.env.SERIAL_BAUD || '115200');
@@ -36,6 +36,12 @@ export function startSerialListener() {
     return;
   }
 
+  // Loaded only on an Edge Gateway (IS_EDGE_GATEWAY=true) - the Cloud/Railway deployment never
+  // talks to a physical serial port, so there is no reason to load the native serialport
+  // bindings (and the memory that comes with them) into every cloud process.
+  ({ SerialPort: SerialPortClass } = await import('serialport'));
+  ({ ReadlineParser: ReadlineParserClass } = await import('@serialport/parser-readline'));
+
   logger.info(`🔌 Attempting to open Serial Port: ${portPath} @ ${baudRate} baud for machine ${getGatewayMachineId()}`);
   connectSerial(portPath, baudRate);
 }
@@ -49,14 +55,14 @@ function connectSerial(portPath, baudRate) {
     reconnectTimer = null;
   }
 
-  portInstance = new SerialPort({
+  portInstance = new SerialPortClass({
     path: portPath,
     baudRate: baudRate,
     autoOpen: false
   });
 
   // Use Readline parser to read data line-by-line
-  const parser = portInstance.pipe(new ReadlineParser({ delimiter: '\r\n' }));
+  const parser = portInstance.pipe(new ReadlineParserClass({ delimiter: '\r\n' }));
 
   const gatewayMachineId = getGatewayMachineId();
 

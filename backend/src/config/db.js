@@ -837,6 +837,15 @@ async function mockQuery(sql, params = []) {
       const minDate = params[1];
       filtered = filtered.filter(l => l.end_time === null || new Date(l.end_time) >= new Date(minDate));
     }
+    if (normalizedSql.includes("status = 'stopped'")) {
+      filtered = filtered.filter(l => l.status === 'Stopped');
+    }
+    if (normalizedSql.includes('order by start_time desc')) {
+      filtered = filtered.slice().sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+    }
+    if (normalizedSql.includes('limit 1')) {
+      filtered = filtered.slice(0, 1);
+    }
     const enriched = filtered.map(log => {
       const machine = mockDb.machines.find(m => m.id === log.machine_id);
       return {
@@ -1285,6 +1294,19 @@ async function mockQuery(sql, params = []) {
     if (normalizedSql.includes('where machine_id = ?')) {
       const mId = params[0];
       filtered = filtered.filter(r => r.machine_id === mId);
+    }
+    // reports/production-summary's day-bounded query: WHERE (start_time >= ? AND start_time < ?)
+    // OR (end_time >= ? AND end_time < ?) - mirrors the SQL added alongside it in api.js.
+    if (normalizedSql.includes('where (start_time >= ? and start_time < ?)')) {
+      const [rangeStart, rangeEnd] = params;
+      filtered = filtered.filter(r => {
+        const s = new Date(r.start_time).getTime();
+        const e = new Date(r.end_time).getTime();
+        const rs = new Date(rangeStart).getTime();
+        const re = new Date(rangeEnd).getTime();
+        return (s >= rs && s < re) || (e >= rs && e < re);
+      });
+      return [JSON.parse(JSON.stringify(filtered)), []];
     }
     filtered.sort((a, b) => new Date(b.end_time) - new Date(a.end_time));
     return [JSON.parse(JSON.stringify(filtered.slice(0, 100))), []];

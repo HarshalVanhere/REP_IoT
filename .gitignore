@@ -21,3 +21,8 @@ coverage/
 target_site.html
 target_site_files/
 parsed_structure.txt
+
+# Research paper evidence/dataset exports - generated artifacts, not application source.
+FINAL_CORRECTED_RESEARCH_EVIDENCE/
+FINAL_RESEARCH_EVIDENCE/
+research_dataset_export/

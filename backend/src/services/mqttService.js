@@ -300,10 +300,11 @@ async function handleResumeMessageLocked(machineId, reason, operatorId) {
   // real Stopped row it belonged to would already be closed with downtime_reason left NULL.
   // Matching on status='Stopped' instead makes this correct regardless of which side of that
   // race actually gets there first.
-  const [machineLogs] = await db.query('SELECT * FROM status_logs WHERE machine_id = ?', [machineId]);
-  const stoppedLog = machineLogs
-    .filter((l) => l.status === 'Stopped')
-    .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))[0];
+  const [stoppedLogRows] = await db.query(
+    "SELECT * FROM status_logs WHERE machine_id = ? AND status = 'Stopped' ORDER BY start_time DESC LIMIT 1",
+    [machineId]
+  );
+  const stoppedLog = stoppedLogRows[0];
 
   if (stoppedLog) {
     // Preserve the existing end_time if the race above already closed it out; otherwise this
