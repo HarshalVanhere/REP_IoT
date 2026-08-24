@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -11,6 +12,12 @@ async function reset() {
     password: process.env.DB_PASSWORD === 'your_mysql_password' ? '' : process.env.DB_PASSWORD,
     database: process.env.DB_NAME || 'cnc_dashboard'
   };
+  // Same optional TLS support as db.js/db-setup.js - required for a managed host like Aiven.
+  if (process.env.DB_SSL === 'true') {
+    connectionConfig.ssl = process.env.DB_SSL_CA_PATH
+      ? { ca: fs.readFileSync(process.env.DB_SSL_CA_PATH), rejectUnauthorized: true }
+      : { rejectUnauthorized: true };
+  }
 
   console.log(`🧹 Attempting to reset database at ${connectionConfig.host}:${connectionConfig.port}...`);
   let connection;

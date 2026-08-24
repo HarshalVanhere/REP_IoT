@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -13,6 +14,13 @@ async function setup() {
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD === 'your_mysql_password' ? '' : process.env.DB_PASSWORD
   };
+  // Same optional TLS support as db.js - required for a managed host like Aiven that
+  // enforces TLS. No-op for a local/on-prem MySQL that doesn't set DB_SSL.
+  if (process.env.DB_SSL === 'true') {
+    connectionConfig.ssl = process.env.DB_SSL_CA_PATH
+      ? { ca: fs.readFileSync(process.env.DB_SSL_CA_PATH), rejectUnauthorized: true }
+      : { rejectUnauthorized: true };
+  }
 
   console.log(`🔌 Attempting to connect to MySQL server at ${connectionConfig.host}:${connectionConfig.port}...`);
   let connection;
