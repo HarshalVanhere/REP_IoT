@@ -13,7 +13,10 @@ services:
     name: rep-iot-backend
     runtime: node
     plan: free
-    buildCommand: "cd frontend && npm ci && npm run build && cd ../backend && npm ci --omit=dev"
+    # --include=dev on the frontend install is required: Render's build environment inherits
+    # NODE_ENV=production (set below for the app's own runtime behavior), which makes plain
+    # `npm ci` skip devDependencies - including vite, which the frontend build needs.
+    buildCommand: "cd frontend && npm ci --include=dev && npm run build && cd ../backend && npm ci --omit=dev"
     startCommand: "node backend/src/server.js"
     healthCheckPath: /api/health
     envVars:
