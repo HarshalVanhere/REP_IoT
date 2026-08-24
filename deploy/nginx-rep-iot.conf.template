@@ -1,0 +1,36 @@
+# nginx reverse-proxy for the REP_IoT backend (Express + WebSocket on one port).
+#
+# Install: copy to /etc/nginx/sites-available/rep-iot, replace <REPLACE_WITH_YOUR_DOMAIN>,
+# then: sudo ln -s /etc/nginx/sites-available/rep-iot /etc/nginx/sites-enabled/
+#       sudo nginx -t && sudo systemctl reload nginx
+#
+# Run certbot AFTER this plain-HTTP block is live and working - certbot --nginx rewrites
+# this file in place to add the TLS server block and the :80 -> :443 redirect. Do not
+# hand-add a 443 block here yourself; let certbot do it (see deploy/ORACLE_DEPLOYMENT.md).
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name <REPLACE_WITH_YOUR_DOMAIN>;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+
+        # Required for the WebSocket upgrade - the app runs `ws` on the same HTTP server/port
+        # as the Express API at the root path (see backend/src/server.js), so this single
+        # location block must forward both plain HTTP requests and the WS upgrade handshake.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Keep long-lived WebSocket connections (dashboard live updates) from being cut by
+        # nginx's default proxy read timeout.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

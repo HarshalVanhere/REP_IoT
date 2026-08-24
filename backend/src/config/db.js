@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
+import fs from 'fs';
 import { logger } from '../utils/logger.js';
 
 dotenv.config();
@@ -211,6 +212,16 @@ const connectionConfig = {
   connectionLimit: 10,
   queueLimit: 0
 };
+
+// Optional TLS for the DB connection - needed by managed MySQL hosts (e.g. Aiven's free tier)
+// that enforce TLS and hand you their own CA certificate, unlike a local/on-prem MySQL (Oracle
+// VM, Raspberry Pi) which talks to 127.0.0.1 with no TLS at all. Off by default so every
+// existing local-MySQL deployment is unaffected.
+if (process.env.DB_SSL === 'true') {
+  connectionConfig.ssl = process.env.DB_SSL_CA_PATH
+    ? { ca: fs.readFileSync(process.env.DB_SSL_CA_PATH), rejectUnauthorized: true }
+    : { rejectUnauthorized: true };
+}
 
 const isProduction = process.env.NODE_ENV === 'production';
 

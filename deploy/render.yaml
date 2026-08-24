@@ -1,0 +1,53 @@
+# Render Blueprint - cardless fallback deployment for the REP_IoT backend.
+# Use only if the Oracle Cloud VM path (deploy/ORACLE_DEPLOYMENT.md) isn't viable (e.g. card
+# verification rejected). See deploy/RENDER_DEPLOYMENT.md for the full walkthrough.
+#
+# Render's free tier requires no credit card, but sleeps the service after ~15 min with no
+# inbound HTTP traffic (cold start ~30-60s on the next request). In practice, an actively
+# syncing Edge Gateway (syncService.js posts to /api/sync/data every 5s) counts as traffic and
+# keeps the service awake continuously - the sleep behavior mainly shows up if no Edge Gateway
+# is live yet and only a human is occasionally opening the dashboard.
+
+services:
+  - type: web
+    name: rep-iot-backend
+    runtime: node
+    plan: free
+    buildCommand: "cd frontend && npm ci && npm run build && cd ../backend && npm ci --omit=dev"
+    startCommand: "node backend/src/server.js"
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # --- Database (Aiven free MySQL - see deploy/RENDER_DEPLOYMENT.md) ---
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: DB_SSL_CA_PATH
+        value: /etc/secrets/aiven-ca.pem
+      # --- Auth / CORS ---
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      # --- Embedded MQTT broker (local-only; Render doesn't expose extra TCP ports on free tier) ---
+      - key: MQTT_PORT
+        value: "1883"
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      # --- This instance is the Cloud tier, never an Edge Gateway ---
+      - key: IS_EDGE_GATEWAY
+        value: "false"
+      - key: SYNC_API_KEY
+        sync: false
