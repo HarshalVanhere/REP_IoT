@@ -23,22 +23,22 @@ syncing yet and a human is just occasionally opening the dashboard.
 5. Once connected (see step 3 below), run the same schema setup used everywhere else in this
    repo: `cd backend && npm run db:setup` (point it at Aiven via the env vars first).
 
-## 2. Render web service (free, no card)
+## 2. Render web service (free, no card) - backend only
+
+The frontend is hosted separately on **Vercel** (see step 3), not served by this backend -
+`render.yaml`'s build only installs the backend.
 
 1. Sign up at render.com (no card required for free tier).
-2. **New → Blueprint**, connect this GitHub repo. Render reads `deploy/render.yaml`
-   automatically if you point the Blueprint at the repo root - alternatively, create the web
-   service manually with:
-   - Build command: `cd frontend && npm ci && npm run build && cd ../backend && npm ci --omit=dev`
-   - Start command: `node backend/src/server.js`
-   - Health check path: `/api/health`
+2. **New → Blueprint**, connect this GitHub repo, Blueprint Path `deploy/render.yaml` (use a
+   forward slash even if the field auto-fills a backslash).
 3. Under the service's **Environment** tab, fill in every variable marked `sync: false` in
    `deploy/render.yaml`:
    - `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` - from Aiven's Overview tab
    - `JWT_SECRET`, `SYNC_API_KEY`, `MQTT_USERNAME`, `MQTT_PASSWORD` - generate each with
      `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-   - `CORS_ORIGIN` - your Render service's URL (e.g. `https://rep-iot-backend.onrender.com`),
-     or your own custom domain if you attach one
+   - `CORS_ORIGIN` - your **Vercel** frontend URL (e.g. `https://your-app.vercel.app`), not
+     this Render service's own URL - this is what lets the browser's fetch/XHR calls from the
+     Vercel-hosted frontend past the backend's CORS check
 4. Under **Secret Files**, add a file at path `/etc/secrets/aiven-ca.pem` with the contents of
    the `ca.pem` you downloaded from Aiven in step 1 - this is what `DB_SSL_CA_PATH` in
    `render.yaml` already points to.
@@ -46,13 +46,29 @@ syncing yet and a human is just occasionally opening the dashboard.
    (MQTT broker start, watchdog start, `Express & WS Server running`) with **no** mock-DB
    fallback line.
 
-## 3. Verify
+## 3. Vercel frontend
+
+The frontend build resolves its backend URL from `VITE_API_URL` (see
+`frontend/src/lib/api.js`) - left blank, it assumes same-origin, which is wrong once frontend
+and backend are on different hosts.
+
+1. In the Vercel project's **Settings → Environment Variables**, add:
+   - `VITE_API_URL` = your Render service's URL, e.g. `https://rep-iot-backend.onrender.com`
+   - `VITE_WS_URL` can stay unset - `api.js` derives it from `VITE_API_URL` automatically
+     (`https` → `wss`)
+2. Redeploy the Vercel project - Vite bakes env vars in at build time, so adding the var alone
+   doesn't take effect until the next build.
+
+## 4. Verify
 
 - `curl https://<your-service>.onrender.com/api/health` → `{"status":"ok","database":"connected",...}`
-- Log in as `ADMIN` / `1234`, change the password immediately.
-- Confirm `/api/machines` returns data and the dashboard's WebSocket connects.
+- Open the Vercel URL in a browser, log in as `ADMIN` / `1234`, change the password
+  immediately. Confirm the dashboard loads data and the WebSocket connects (check the browser
+  devtools Network tab for a `101 Switching Protocols` to the Render URL) - a CORS or mixed
+  origin mistake here usually shows up as a blocked fetch/WS in the console pointing at
+  `CORS_ORIGIN`/`VITE_API_URL` being wrong.
 
-## 4. Point the Edge Gateway at this URL
+## 5. Point the Edge Gateway at the Render URL
 
 Same as the Oracle path - on each Raspberry Pi Edge Gateway, set in `backend/.env`:
 

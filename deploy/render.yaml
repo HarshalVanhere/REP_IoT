@@ -1,6 +1,9 @@
-# Render Blueprint - cardless fallback deployment for the REP_IoT backend.
-# Use only if the Oracle Cloud VM path (deploy/ORACLE_DEPLOYMENT.md) isn't viable (e.g. card
-# verification rejected). See deploy/RENDER_DEPLOYMENT.md for the full walkthrough.
+# Render Blueprint - cardless fallback deployment for the REP_IoT backend (API + WebSocket +
+# embedded MQTT broker only). The frontend is hosted separately on Vercel - see
+# frontend/.env's VITE_API_URL, which must point at this service's URL, and this service's
+# CORS_ORIGIN below, which must point at the Vercel URL. Because the two are on different
+# origins, server.js's express.static(frontend/dist)/catch-all route are simply unused here
+# (any unmatched non-API GET just 404s, which is expected and harmless).
 #
 # Render's free tier requires no credit card, but sleeps the service after ~15 min with no
 # inbound HTTP traffic (cold start ~30-60s on the next request). In practice, an actively
@@ -13,10 +16,7 @@ services:
     name: rep-iot-backend
     runtime: node
     plan: free
-    # --include=dev on the frontend install is required: Render's build environment inherits
-    # NODE_ENV=production (set below for the app's own runtime behavior), which makes plain
-    # `npm ci` skip devDependencies - including vite, which the frontend build needs.
-    buildCommand: "cd frontend && npm ci --include=dev && npm run build && cd ../backend && npm ci --omit=dev"
+    buildCommand: "cd backend && npm ci --omit=dev"
     startCommand: "node backend/src/server.js"
     healthCheckPath: /api/health
     envVars:
