@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package, Wifi, WifiOff } from 'lucide-react';
+import { Play, Ban, AlertTriangle, Clock, LogOut, User, Calendar, Package, Wifi, WifiOff, Target } from 'lucide-react';
 import DowntimeReasonModal from './DowntimeReasonModal';
 import jbmLogo from '../assets/jbmlogo (1).png';
 import roseLogo from '../assets/rose logo (1).png';
@@ -9,6 +9,15 @@ import roseLogo from '../assets/rose logo (1).png';
 // poll normally succeeds every 1.5s in kiosk mode (see App.jsx) - this threshold gives several
 // missed polls of slack for ordinary network jitter before warning the operator.
 const STALE_DATA_THRESHOLD_MS = 10000;
+
+// Same shift boundaries as SHIFT_END_MINUTES below, plus each shift's start, so the Hourly
+// Target card can derive "parts/hr" and "expected by now" from the existing whole-shift target
+// without needing a new backend field.
+const SHIFT_WINDOWS = {
+  'Shift A': { start: 7 * 60, end: 15.5 * 60 },
+  'Shift B': { start: 15.5 * 60, end: 24 * 60 },
+  'Shift C': { start: 0, end: 7 * 60 },
+};
 
 export default function OperatorTerminal({
   machines,
@@ -177,6 +186,31 @@ export default function OperatorTerminal({
       : status === 'Stopped'
       ? { grad: 'from-rose-950/70', border: 'border-rose-900/50', text: 'text-rose-300', solid: 'from-rose-500 to-rose-700', glow: 'shadow-rose-900/60' }
       : { grad: 'from-violet-950/70', border: 'border-violet-900/50', text: 'text-violet-300', solid: 'from-violet-500 to-violet-700', glow: 'shadow-violet-900/60' };
+
+  // Hourly Target: the shift's whole-shift `target` spread evenly across the shift's duration,
+  // so an operator can see the pace they need to hold (parts/hr) and whether they're currently
+  // ahead or behind where that pace should have them by now - not just the end-of-shift total.
+  const shiftWindow = SHIFT_WINDOWS[currentShift] ?? SHIFT_WINDOWS['Shift A'];
+  const shiftDurationHours = (shiftWindow.end - shiftWindow.start) / 60;
+  const nowDate = new Date(nowTick);
+  const nowMinutesOfDay = nowDate.getHours() * 60 + nowDate.getMinutes() + nowDate.getSeconds() / 60;
+  // Shift C starts at midnight, so "now" can read earlier in the clock than shiftWindow.start
+  // while still being inside that shift (e.g. 02:00 is inside a 00:00 start) - never negative here,
+  // but guarded the same way as the countdown effect above for shifts that wrap past midnight.
+  let elapsedMinutes = nowMinutesOfDay - shiftWindow.start;
+  if (elapsedMinutes < 0) elapsedMinutes += 24 * 60;
+  elapsedMinutes = Math.min(elapsedMinutes, shiftWindow.end - shiftWindow.start);
+  const elapsedHours = elapsedMinutes / 60;
+  const hourlyTargetRate = shiftDurationHours > 0 ? target / shiftDurationHours : 0;
+  const expectedByNow = hourlyTargetRate * elapsedHours;
+  const paceDelta = production_count - expectedByNow;
+  const paceTolerance = Math.max(hourlyTargetRate * 0.1, 2);
+  const paceTheme =
+    paceDelta >= 0
+      ? { grad: 'from-emerald-950/70', border: 'border-emerald-900/50', text: 'text-emerald-300', label: paceDelta > 0 ? `+${Math.round(paceDelta)} Ahead` : 'On Target' }
+      : paceDelta >= -paceTolerance
+      ? { grad: 'from-amber-950/70', border: 'border-amber-900/50', text: 'text-amber-300', label: `${Math.round(paceDelta)} Behind` }
+      : { grad: 'from-rose-950/70', border: 'border-rose-900/50', text: 'text-rose-300', label: `${Math.round(paceDelta)} Behind` };
 
   return (
     <div className="w-screen h-screen bg-slate-950 flex flex-col justify-between p-4 text-slate-100 font-sans select-none m-0 border-none overflow-hidden relative">
@@ -377,8 +411,8 @@ export default function OperatorTerminal({
               </div>
             </div>
 
-            {/* Right Side: 2x2 grid of secondary stat cards */}
-            <div className="col-span-6 grid grid-cols-2 grid-rows-2 gap-3 h-full min-h-0">
+            {/* Right Side: 3x2 grid of secondary stat cards (Shift & Duty spans both rows) */}
+            <div className="col-span-6 grid grid-cols-3 grid-rows-2 gap-3 h-full min-h-0">
 
               {/* 1. Machine Status */}
               <div className="bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-xl shadow-black/40">
@@ -439,8 +473,25 @@ export default function OperatorTerminal({
                 </div>
               </div>
 
-              {/* 4. Shift & Duty */}
+              {/* 4. Hourly Target */}
               <div className="bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-xl shadow-black/40">
+                <div className={`bg-gradient-to-r ${paceTheme.grad} to-slate-900 border-b-2 ${paceTheme.border} py-2 text-center shrink-0`}>
+                  <span className="text-xs font-black tracking-widest text-amber-300 uppercase">Hourly Target</span>
+                </div>
+                <div className="flex-1 flex flex-col items-center justify-center p-1 text-center gap-1 min-h-0">
+                  <Target className="w-7 h-7 text-amber-400 shrink-0" />
+                  <span className="text-3xl font-black font-mono text-slate-100 leading-none">
+                    {hourlyTargetRate.toFixed(0)}<span className="text-sm text-slate-500 font-bold">/hr</span>
+                  </span>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase leading-none">Expect {Math.round(expectedByNow)} By Now</span>
+                  <span className={`text-xs font-black uppercase leading-none ${paceTheme.text}`}>{paceTheme.label}</span>
+                </div>
+              </div>
+
+              {/* 5. Shift & Duty (explicitly placed in col 3, spanning both rows - keeps this
+                  card's position stable regardless of DOM order among the four single-cell
+                  cards above, which auto-place into whatever cells are left) */}
+              <div className="col-start-3 row-start-1 row-span-2 bg-gradient-to-b from-slate-900 to-[#050b18] border-2 border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-xl shadow-black/40">
                 <div className="bg-gradient-to-r from-violet-950 to-slate-900 border-b-2 border-violet-900/40 py-2 text-center shrink-0">
                   <span className="text-xs font-black tracking-widest text-violet-300 uppercase">Shift &amp; Duty</span>
                 </div>
